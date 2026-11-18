@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>VEYPORT: Ashes &amp; Gold</title>
+<link rel="stylesheet" href="./styles.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.min.js" } }
+</script>
+</head>
+<body>
+<canvas id="gl" aria-label="Veyport: Ashes and Gold, an open-world crime game"></canvas>
+<div id="vignette" aria-hidden="true"></div>
+<div id="flash" aria-hidden="true"></div>
+
+<!-- ============ HUD ============ -->
+<div id="hud" class="hidden" aria-hidden="true">
+  <div id="statsPlate" class="plate">
+    <div class="barRow"><span class="barTag" data-i18n="hp">Health</span><div class="bar"><div id="hpFill"></div></div><span id="hpNum" class="barNum">100</span></div>
+    <div class="barRow"><span class="barTag" data-i18n="armor">Armor</span><div class="bar"><div id="armorFill"></div></div><span id="armorNum" class="barNum">0</span></div>
+    <div id="cashRow"><span id="cash">$0</span><span id="stars" aria-label="Wanted level"></span></div>
+  </div>
+  <div id="topCenter">
+    <canvas id="compassCanvas" width="360" height="26"></canvas>
+    <div id="district">Neon Mile</div>
+    <div id="clockRow"><span id="clock">08:00</span><span id="weatherLabel">Clear</span></div>
+  </div>
+  <div id="objective" class="plate hidden">
+    <div id="objKind">Mission</div>
+    <div id="objTitle"></div>
+    <div id="objText"></div>
+    <div id="objMeta"><span id="objDist"></span><span id="objTimer"></span></div>
+  </div>
+  <div id="minimapWrap">
+    <canvas id="minimapCanvas" width="220" height="220"></canvas>
+    <div id="minimapHint" data-i18n="minimapHint">Click to mark · wheel zooms</div>
+  </div>
+  <div id="weaponPlate" class="plate">
+    <div id="weaponSlots"></div>
+    <div id="weaponName">Fists</div>
+    <div id="ammoRow"><span id="ammoMag">—</span><span id="ammoReserve"></span></div>
+    <div id="speedo" class="hidden"><span id="speedVal">0</span><span class="speedUnit">km/h</span><div class="bar thin"><div id="carHealthFill"></div></div></div>
+  </div>
+  <div id="crosshair" aria-hidden="true"><span class="chDot"></span><span class="chT"></span><span class="chB"></span><span class="chL"></span><span class="chR"></span></div>
+  <div id="hitmarker" aria-hidden="true"></div>
+  <div id="notices" aria-live="polite"></div>
+  <div id="prompt" class="hidden"><span id="promptKey">F</span><span id="promptText"></span></div>
+  <div id="savingInd" class="hidden" data-i18n="saving">Saving…</div>
+  <div id="centerMsg" class="hidden"></div>
+  <div id="wantedBanner" class="hidden"></div>
+</div>
+
+<!-- ============ Dialog ============ -->
+<div id="dialog" class="hidden">
+  <div id="dialogBox">
+    <canvas id="portraitCanvas" width="96" height="96"></canvas>
+    <div id="dialogMain">
+      <div id="speaker"></div>
+      <div id="dialogText"></div>
+      <div id="dialogChoices"></div>
+      <div id="dialogHint" data-i18n="dialogHint">Click or press E to continue</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Touch controls ============ -->
+<div id="touch" class="hidden" aria-hidden="true">
+  <div id="joy"><div id="joyKnob"></div></div>
+  <div id="touchBtns">
+    <button type="button" id="btnFire" class="tBtn big" data-i18n="fire">FIRE</button>
+    <button type="button" id="btnAction" class="tBtn" data-i18n="enter">ENTER</button>
+    <button type="button" id="btnBrake" class="tBtn" data-i18n="drift">DRIFT</button>
+    <button type="button" id="btnInteract" class="tBtn" data-i18n="use">USE</button>
+  </div>
+  <div id="touchTop">
+    <button type="button" id="btnMapT" class="tBtn small" data-i18n="map">MAP</button>
+    <button type="button" id="btnPauseT" class="tBtn small">II</button>
+  </div>
+  <div id="touchWeapons"></div>
+</div>
+
+<!-- ============ Main menu ============ -->
+<div id="menu">
+  <div id="menuInner">
+    <div id="menuKicker">A HARBOR CITY STORY</div>
+    <h1 id="menuTitle">VEYPORT</h1>
+    <div id="menuSub">ASHES &amp; GOLD</div>
+    <p id="menuTag" data-i18n="tagline">Rook Calloway came home to bury a debt. The city had other plans.</p>
+    <nav id="menuBtns">
+      <button type="button" id="btnContinue" class="mBtn primary" data-i18n="continue">Continue</button>
+      <button type="button" id="btnNew" class="mBtn" data-i18n="newGame">New Game</button>
+      <button type="button" id="btnLoad" class="mBtn" data-i18n="loadGame">Load Game</button>
+      <button type="button" id="btnSettings" class="mBtn" data-i18n="settings">Settings</button>
+      <button type="button" id="btnCredits" class="mBtn" data-i18n="credits">Credits</button>
+    </nav>
+    <div id="menuFoot"><span id="menuSaveInfo"></span><span>Veyport is an original city. No real place, no borrowed names.</span></div>
+  </div>
+</div>
+
+<!-- ============ Pause ============ -->
+<div id="pause" class="hidden">
+  <div id="pauseBox">
+    <div id="pauseHead"><span id="pauseTitle" data-i18n="paused">Paused</span><button type="button" id="btnResume" class="mBtn small" data-i18n="resume">Resume</button></div>
+    <div id="pauseTabs" role="tablist">
+      <button type="button" class="pTab" data-tab="map" data-i18n="map">Map</button>
+      <button type="button" class="pTab" data-tab="stats" data-i18n="stats">Stats</button>
+      <button type="button" class="pTab" data-tab="ledger" data-i18n="ledger">Ledger</button>
+      <button type="button" class="pTab" data-tab="inventory" data-i18n="inventory">Inventory</button>
+      <button type="button" class="pTab" data-tab="log" data-i18n="dialogLog">Dialog Log</button>
+      <button type="button" class="pTab" data-tab="save" data-i18n="saveLoad">Save / Load</button>
+    </div>
+    <div id="panelMap" class="pPanel">
+      <canvas id="fullmapCanvas" width="860" height="560"></canvas>
+      <div id="mapLegend"></div>
+      <div id="mapFilters"></div>
+      <div id="forecastRow"><span data-i18n="forecast">Forecast</span><span id="forecastText"></span></div>
+    </div>
+    <div id="panelStats" class="pPanel hidden"><div id="statsGrid"></div><div id="repGrid"></div></div>
+    <div id="panelLedger" class="pPanel hidden"><div id="ledgerHead"></div><div id="ledgerList"></div></div>
+    <div id="panelInventory" class="pPanel hidden"><div id="invWeapons"></div><div id="invItems"></div><div id="invGarage"></div></div>
+    <div id="panelLog" class="pPanel hidden"><div id="logList"></div></div>
+    <div id="panelSave" class="pPanel hidden"><div id="saveSlots"></div><div id="saveBtns">
+      <button type="button" id="btnExport" class="mBtn small" data-i18n="exportSave">Export save file</button>
+      <button type="button" id="btnImport" class="mBtn small" data-i18n="importSave">Import save file</button>
+    </div><div id="saveMsg"></div></div>
+    <div id="pauseFoot">
+      <button type="button" id="btnPauseSettings" class="mBtn small" data-i18n="settings">Settings</button>
+      <button type="button" id="btnQuitMenu" class="mBtn small danger" data-i18n="quitToMenu">Quit to menu</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Mission results ============ -->
+<div id="results" class="hidden">
+  <div id="resultsBox">
+    <div id="resultKicker"></div>
+    <h2 id="resultTitle"></h2>
+    <div id="resultRank"></div>
+    <div id="resultRows"></div>
+    <div id="resultBtns">
+      <button type="button" id="btnResultContinue" class="mBtn primary" data-i18n="continue">Continue</button>
+      <button type="button" id="btnResultReplay" class="mBtn" data-i18n="replayMission">Replay mission</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ Shop / board modal ============ -->
+<div id="modal" class="hidden">
+  <div id="modalBox">
+    <div id="modalHead"><span id="modalTitle"></span><button type="button" id="modalClose" class="mBtn small">✕</button></div>
+    <div id="modalSub"></div>
+    <div id="modalItems"></div>
+    <div id="modalFoot"><span id="modalCash"></span><span id="modalMsg"></span></div>
+  </div>
+</div>
+
+<!-- ============ Settings ============ -->
+<div id="settings" class="hidden">
+  <div id="settingsBox">
+    <div id="settingsHead"><span data-i18n="settings">Settings</span><button type="button" id="settingsClose" class="mBtn small">✕</button></div>
+    <div class="setRow"><label data-i18n="language">Language</label><select id="setLang"><option value="en">English</option><option value="id">Bahasa Indonesia</option></select></div>
+    <div class="setRow"><label data-i18n="masterVol">Master volume</label><input type="range" id="setMaster" min="0" max="100" step="1"><span class="setVal" id="valMaster"></span></div>
+    <div class="setRow"><label data-i18n="sfxVol">Effects volume</label><input type="range" id="setSfx" min="0" max="100" step="1"><span class="setVal" id="valSfx"></span></div>
+    <div class="setRow"><label data-i18n="musicVol">Music volume</label><input type="range" id="setMusic" min="0" max="100" step="1"><span class="setVal" id="valMusic"></span></div>
+    <div class="setRow"><label data-i18n="ambientVol">Ambient volume</label><input type="range" id="setAmbient" min="0" max="100" step="1"><span class="setVal" id="valAmbient"></span></div>
+    <div class="setRow"><label data-i18n="sensitivity">Mouse sensitivity</label><input type="range" id="setSens" min="20" max="200" step="5"><span class="setVal" id="valSens"></span></div>
+    <div class="setRow"><label data-i18n="quality">Graphics quality</label><select id="setQuality"><option value="auto">Auto</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></div>
+    <div class="setRow"><label data-i18n="touchControls">Touch controls</label><select id="setTouch"><option value="auto">Auto</option><option value="on">On</option><option value="off">Off</option></select></div>
+    <div class="setRow"><label data-i18n="reduceShake">Reduce screen shake</label><input type="checkbox" id="setShake"></div>
+    <div class="setRow"><label data-i18n="colorblind">Colorblind-safe map blips</label><input type="checkbox" id="setColorblind"></div>
+    <div id="settingsFoot"><button type="button" id="btnSettingsDefaults" class="mBtn small" data-i18n="defaults">Restore defaults</button></div>
+  </div>
+</div>
+
+<!-- ============ Credits ============ -->
+<div id="creditsBox" class="hidden">
+  <div id="creditsInner">
+    <h2>VEYPORT: Ashes &amp; Gold</h2>
+    <p data-i18n="creditsBody">An original open-world crime game. City, characters, vehicles, story, art and music were made for this game. Built with three.js r160 (MIT). All sound is synthesized live with WebAudio. No network, no tracking, no purchases.</p>
+    <p id="creditsControls"></p>
+    <button type="button" id="btnCreditsClose" class="mBtn primary" data-i18n="close">Close</button>
+  </div>
+</div>
+
+<!-- ============ Slots / confirm ============ -->
+<div id="slotsOverlay" class="hidden">
+  <div id="slotsBox">
+    <div id="slotsHead"><span id="slotsTitle" data-i18n="loadGame">Load Game</span><button type="button" id="slotsClose" class="mBtn small">✕</button></div>
+    <div id="slotList"></div>
+    <div id="slotsMsg"></div>
+  </div>
+</div>
+<div id="confirmOverlay" class="hidden">
+  <div id="confirmBox">
+    <div id="confirmText"></div>
+    <div id="confirmBtns"><button type="button" id="confirmYes" class="mBtn primary danger"></button><button type="button" id="confirmNo" class="mBtn" data-i18n="cancel">Cancel</button></div>
+  </div>
+</div>
+
+<div id="loading"><div id="loadingCard"><div id="loadingTitle">VEYPORT</div><div id="loadingText">Building the city…</div><div id="loadingBar"><div id="loadingFill"></div></div></div></div>
+<input type="file" id="importFile" accept=".json,application/json" class="hidden" aria-hidden="true">
+<p id="srStatus" role="status" aria-live="polite"></p>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
