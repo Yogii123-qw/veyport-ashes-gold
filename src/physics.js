@@ -60,8 +60,8 @@ export function createPhysics(game) {
   const colliderList = [];
   const scratch = [];
 
-  function addCollider(x0, z0, x1, z1, kind) {
-    const aabb = { x0: Math.min(x0, x1), z0: Math.min(z0, z1), x1: Math.max(x0, x1), z1: Math.max(z0, z1), kind: kind || 'building' };
+  function addCollider(x0, z0, x1, z1, kind, height) {
+    const aabb = { x0: Math.min(x0, x1), z0: Math.min(z0, z1), x1: Math.max(x0, x1), z1: Math.max(z0, z1), kind: kind || 'building', height: height ?? Infinity };
     colliderList.push(aabb);
     statics.insert(aabb, aabb);
     return aabb;
@@ -172,22 +172,53 @@ export function createPhysics(game) {
     return true;
   }
 
+  /** Is the lens position (px,pz) at height camY inside a collider tall enough to reach it? */
+  function cameraBlockedAt(px, pz, camY) {
+    scratch.length = 0;
+    statics.query(px - 0.5, pz - 0.5, px + 0.5, pz + 0.5, scratch);
+    for (const entry of scratch) {
+      const a = entry.aabb;
+      // A low prop (market stall, bridge rail, container) never blocks
+      // a camera flying above it — only colliders that reach the lens
+      // height count. Unspecified heights block everything, as before.
+      if (a.height < camY - 0.3) continue;
+      const cx = clamp(px, a.x0, a.x1);
+      const cz = clamp(pz, a.z0, a.z1);
+      const dx = px - cx;
+      const dz = pz - cz;
+      if (dx * dx + dz * dz < 0.25) return true;
+    }
+    return false;
+  }
+
   /** Shorten a camera ray so the lens never sits inside a building. */
   function shortenCameraRay(focus, desired) {
     const dx = desired.x - focus.x;
     const dz = desired.z - focus.z;
     const len = Math.hypot(dx, dz);
     if (len < 0.5) return desired;
-    const steps = 8;
-    for (let i = steps; i >= 1; i -= 1) {
-      const t = i / steps;
-      const px = focus.x + dx * t;
-      const pz = focus.z + dz * t;
-      const hit = resolveCircle(px, pz, 0.5, {});
-      if (!hit.hit && !inWater(px, pz)) {
-        if (t === 1) return desired;
-        return new THREE.Vector3(px, focus.y + (desired.y - focus.y) * t, pz);
-      }
+    const pointAt = (t) => ({
+      x: focus.x + dx * t,
+      y: focus.y + (desired.y - focus.y) * t,
+      z: focus.z + dz * t,
+    });
+    const blocked = (t) => {
+      const p = pointAt(t);
+      return cameraBlockedAt(p.x, p.z, p.y) || inWater(p.x, p.z);
+    };
+    if (!blocked(1)) return desired;
+    // Binary-search the farthest unblocked point along the ray: exact
+    // to ~10 cm instead of snapping to coarse eighths.
+    let lo = 0;
+    let hi = 1;
+    for (let i = 0; i < 7; i += 1) {
+      const mid = (lo + hi) / 2;
+      if (blocked(mid)) hi = mid;
+      else lo = mid;
+    }
+    if (lo > 0.12) {
+      const p = pointAt(lo);
+      return new THREE.Vector3(p.x, p.y, p.z);
     }
     // Every sample blocked: rise above the focus instead of collapsing
     // onto the player's head.
@@ -203,8 +234,13 @@ export function createPhysics(game) {
    */
   function stepVehicle(body, def, drive, dt, gripScale) {
     const speed = Math.hypot(body.vx, body.vz);
-    const damaged = body.integrity < 60 ? 1 - (60 - body.integrity) / 60 * 0.35 : 1;
-    const topSpeed = def.topSpeed * damaged * (body.integrity < 30 ? 0.75 : 1);
+    // Damage caps the top speed RELATIVE to the car's own integrity
+    // pool: the old absolute "< 60" test permanently crippled
+    // low-durability cars (a full-health 38-durability supercar ran at
+    // 87% of its top speed forever). Full health is always full speed.
+    const healthFrac = clamp(body.integrity / Math.max(1, body.maxIntegrity || def.durability), 0, 1);
+    const damaged = healthFrac < 0.6 ? 1 - ((0.6 - healthFrac) / 0.6) * 0.35 : 1;
+    const topSpeed = def.topSpeed * damaged * (healthFrac < 0.3 ? 0.75 : 1);
     const onRoad = game.roadgraph.onRoad(body.x, body.z);
     const surfaceGrip = (onRoad ? 1 : 0.62) * gripScale;
 
@@ -229,15 +265,24 @@ export function createPhysics(game) {
     let vLateral = body.vx * nright.x + body.vz * nright.z;
 
     // Longitudinal: throttle, brake/reverse, drag, rolling resistance.
+    // The power curve stays strong through the mid-range and eases off
+    // only near the top, so a car actually reaches its top speed: the
+    // old linear taper (1 - 0.85r) plus heavy drag stalled every car at
+    // 33-52% of its top speed (measured 19 Nov 2026). Cruise now sits
+    // at ~95% of topSpeed and 0-90% takes a few seconds per class.
     if (drive.throttle > 0) {
-      const accel = def.accel * (1 - clamp(vForward / topSpeed, 0, 1) * 0.85);
+      const r = clamp(vForward / topSpeed, 0, 1);
+      const accel = def.accel * Math.pow(1 - r, 0.45);
       vForward += accel * drive.throttle * dt;
+      // Soft limiter: bleed off any overshoot above the top speed
+      // instead of letting the curve push past it.
+      if (vForward > topSpeed) vForward -= (vForward - topSpeed) * 1.5 * dt;
     } else if (drive.throttle < 0) {
       if (vForward > 0.5) vForward += def.brake * drive.throttle * dt;
       else vForward = Math.max(vForward + def.accel * 0.55 * drive.throttle * dt, -topSpeed * 0.35);
     }
-    vForward -= vForward * (onRoad ? 0.25 : 0.7) * dt;
-    vForward -= Math.sign(vForward) * Math.min(Math.abs(vForward), 1.2 * dt);
+    vForward -= vForward * (onRoad ? 0.06 : 0.35) * dt;
+    vForward -= Math.sign(vForward) * Math.min(Math.abs(vForward), 0.8 * dt);
 
     // Lateral grip: the handbrake breaks it, which is what a drift is.
     const drifting = drive.handbrake && Math.abs(vForward) > 6;
@@ -327,6 +372,7 @@ export function createPhysics(game) {
     inTunnel,
     resolveCircle,
     segmentBlocked,
+    cameraBlockedAt,
     shortenCameraRay,
     stepVehicle,
     moveWalker,

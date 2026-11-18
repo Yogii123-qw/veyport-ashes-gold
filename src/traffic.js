@@ -4,7 +4,7 @@
 // be carjacked, crashed and sold like any other.
 
 import * as THREE from 'three';
-import { CIVILIAN_TYPES, TRAFFIC_WEIGHTS } from '../data/vehiclesData.js';
+import { SUPERCAR_TYPES, TRAFFIC_WEIGHTS } from '../data/vehiclesData.js';
 import { clamp, dampAngle, dist2 } from './utils.js';
 
 const LIGHT_CYCLE = 21;
@@ -61,6 +61,11 @@ export function createTraffic(game) {
   }
 
   function pickType(random) {
+    // Supercars stay rare: a 4% roll, split across the class, instead
+    // of a bag weight that would flood the streets with them.
+    if (random() < 0.04) {
+      return SUPERCAR_TYPES[Math.floor(random() * SUPERCAR_TYPES.length)];
+    }
     const bag = [];
     for (const [type, w] of Object.entries(TRAFFIC_WEIGHTS)) {
       for (let i = 0; i < w; i += 1) bag.push(type);

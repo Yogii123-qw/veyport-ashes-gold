@@ -6,6 +6,7 @@ export const LANG = {
   en: {
     hp: 'Health', armor: 'Armor', saving: 'Saving…', minimapHint: 'Click to mark · wheel zooms',
     dialogHint: 'Click or press E to continue', fire: 'FIRE', enter: 'ENTER', drift: 'DRIFT', use: 'USE',
+    run: 'RUN', startingGun: 'P9 Sidearm equipped — FIRE to shoot', carBurning: 'Get out — the car is burning!',
     map: 'Map', continue: 'Continue', newGame: 'New Game', loadGame: 'Load Game', settings: 'Settings',
     credits: 'Credits', paused: 'Paused', resume: 'Resume', stats: 'Stats', ledger: 'Ledger',
     inventory: 'Inventory', dialogLog: 'Dialog Log', saveLoad: 'Save / Load', exportSave: 'Export save file',
@@ -25,7 +26,7 @@ export const LANG = {
     witness: 'A witness is calling the police!', arrested: 'Arrested. Illegal weapons seized.',
     hospital: 'Hospital bill paid.', resprayDone: 'Fresh paint. The heat is off.',
     bribeDone: 'The word is out. The heat is off.', garageFull: 'The garage is full.',
-    vehicleStored: 'Vehicle stored in the garage.', noMoney: 'Not enough cash.',
+    vehicleStored: 'Vehicle stored in the garage.', garageStale: 'That stored vehicle no longer exists. It was removed from the garage.', noMoney: 'Not enough cash.',
     bought: 'Purchased', soldVehicle: 'Vehicle sold', safehouseSlept: 'You slept. The city moved on 8 hours.',
     emptySlot: 'Empty slot', overwrite: 'Overwrite', load: 'Load', delete: 'Delete', save: 'Save',
     newGameWarn: 'Start a new game? Unsaved progress in the current game will be lost.',
@@ -57,6 +58,7 @@ export const LANG = {
   id: {
     hp: 'Darah', armor: 'Armor', saving: 'Menyimpan…', minimapHint: 'Klik untuk menandai · roda mouse zoom',
     dialogHint: 'Klik atau tekan E untuk lanjut', fire: 'TEMBAK', enter: 'MASUK', drift: 'DRIFT', use: 'PAKAI',
+    run: 'LARI', startingGun: 'P9 Sidearm terpasang — TEMBAK untuk menembak', carBurning: 'Keluar — mobil terbakar!',
     map: 'Peta', continue: 'Lanjutkan', newGame: 'Permainan Baru', loadGame: 'Muat Save', settings: 'Pengaturan',
     credits: 'Kredit', paused: 'Jeda', resume: 'Lanjut', stats: 'Statistik', ledger: 'Buku Keuangan',
     inventory: 'Inventaris', dialogLog: 'Log Dialog', saveLoad: 'Simpan / Muat', exportSave: 'Ekspor file save',
@@ -76,7 +78,7 @@ export const LANG = {
     witness: 'Seorang saksi menelepon polisi!', arrested: 'Ditangkap. Senjata ilegal disita.',
     hospital: 'Tagihan rumah sakit dibayar.', resprayDone: 'Cat baru. Kejaran hilang.',
     bribeDone: 'Kabar tersebar. Kejaran hilang.', garageFull: 'Garasi penuh.',
-    vehicleStored: 'Kendaraan disimpan di garasi.', noMoney: 'Uang tidak cukup.',
+    vehicleStored: 'Kendaraan disimpan di garasi.', garageStale: 'Kendaraan yang disimpan itu sudah tidak ada. Sudah dihapus dari garasi.', noMoney: 'Uang tidak cukup.',
     bought: 'Terbeli', soldVehicle: 'Kendaraan terjual', safehouseSlept: 'Kau tidur. Kota berjalan 8 jam.',
     emptySlot: 'Slot kosong', overwrite: 'Timpa', load: 'Muat', delete: 'Hapus', save: 'Simpan',
     newGameWarn: 'Mulai permainan baru? Progres yang belum disimpan akan hilang.',

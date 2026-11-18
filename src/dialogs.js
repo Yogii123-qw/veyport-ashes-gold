@@ -24,6 +24,7 @@ export function createDialogs(game) {
   let onDone = null;
   let open = false;
   let choicesOpen = false;
+  let choiceKeyListener = null;
   const log = [];
 
   function drawPortrait(who) {
@@ -127,6 +128,10 @@ export function createDialogs(game) {
   }
 
   function play(nextLines, done) {
+    if (choiceKeyListener) {
+      document.removeEventListener('keydown', choiceKeyListener);
+      choiceKeyListener = null;
+    }
     lines = nextLines;
     lineIndex = 0;
     onDone = done || null;
@@ -166,20 +171,42 @@ export function createDialogs(game) {
   }
 
   function showChoices(choices, onPick) {
+    // Choices arrive after the lines finish, which closes the dialog:
+    // re-open it, or the buttons render inside a hidden box and the
+    // player is soft-locked with no visible way forward.
+    open = true;
+    game.dialogOpen = true;
+    root.classList.remove('hidden');
     choicesOpen = true;
     choicesEl.innerHTML = '';
-    for (const choice of choices) {
+    const buttons = [];
+    // Number keys 1-9 pick a choice, so keyboard players never need
+    // the mouse mid-conversation. The listener removes itself the
+    // moment the choice is made or the dialog closes.
+    const onKey = (event) => {
+      const index = Number(event.key) - 1;
+      if (Number.isInteger(index) && index >= 0 && index < buttons.length) {
+        event.preventDefault();
+        buttons[index].click();
+      }
+    };
+    choiceKeyListener = onKey;
+    document.addEventListener('keydown', onKey);
+    for (const [i, choice] of choices.entries()) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'choiceBtn';
-      button.textContent = choice.label[game.settings.language] || choice.label.en;
+      button.textContent = `${i + 1}. ${choice.label[game.settings.language] || choice.label.en}`;
       button.addEventListener('click', () => {
+        document.removeEventListener('keydown', onKey);
+        choiceKeyListener = null;
         game.audio.playSfx('click', game.player.x, game.player.z);
         choicesEl.innerHTML = '';
         choicesOpen = false;
         close();
         onPick(choice);
       });
+      buttons.push(button);
       choicesEl.appendChild(button);
     }
   }

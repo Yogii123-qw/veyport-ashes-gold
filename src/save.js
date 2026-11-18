@@ -5,6 +5,7 @@
 
 import { canonicalStringify, fnv1a } from './utils.js';
 import { PLAYER_SPAWN } from '../data/cityData.js';
+import { weaponById } from '../data/weaponsData.js';
 
 export const SAVE_VERSION = 1;
 const SLOT_KEY = (n) => `veyport.save.${n}`;
@@ -91,9 +92,15 @@ export function createSave(game) {
     game.player.medkits = state.player.medkits;
     game.player.weapons = {};
     for (const [id, w] of Object.entries(state.player.weapons)) {
+      // Unknown ids (edited or older saves) are dropped, never trusted:
+      // combat looks the weapon up by id and would crash on a ghost.
+      if (!weaponById(id)) continue;
       game.player.weapons[id] = { reserve: w.reserve, mag: w.mag };
     }
-    game.player.currentWeapon = state.player.weapon;
+    if (!game.player.weapons.fists) game.player.weapons.fists = { reserve: 0, mag: 0 };
+    game.player.currentWeapon = game.player.weapons[state.player.weapon]
+      ? state.player.weapon
+      : (game.player.weapons.p9 ? 'p9' : 'fists');
     if (playerVehicle) {
       game.player.vehicle = playerVehicle;
       playerVehicle.driver = 'player';
@@ -137,7 +144,23 @@ export function createSave(game) {
   }
 
   function wrap(payload) {
-    return { version: SAVE_VERSION, checksum: checksumOf(payload), payload };
+    // The checksum must cover exactly the bytes that get stored: any
+    // undefined value would be dropped by JSON.stringify and void the
+    // checksum on import, so undefined keys are stripped first, deeply.
+    const clean = stripUndefined(payload);
+    return { version: SAVE_VERSION, checksum: checksumOf(clean), payload: clean };
+  }
+
+  function stripUndefined(value) {
+    if (Array.isArray(value)) return value.map(stripUndefined);
+    if (value && typeof value === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(value)) {
+        if (v !== undefined) out[k] = stripUndefined(v);
+      }
+      return out;
+    }
+    return value;
   }
 
   function writeSlot(slot) {

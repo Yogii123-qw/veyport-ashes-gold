@@ -243,6 +243,8 @@ function boot() {
     game.hud.clearObjective();
     game.cameraRig.snapBehind(PLAYER_SPAWN.heading);
     startPlaying();
+    // The gun path must be obvious without a guide: say it out loud.
+    game.hud.notify(game.lang('startingGun'), 'good');
   }
 
   game.main = { startPlaying, quitToMenu, newGame, applyTouchVisibility, setTouchVisible };
@@ -358,14 +360,20 @@ function boot() {
       return;
     }
 
-    const target = scanInteract();
-    if (pressed.has('interact')) doInteract(target);
-    if (target) game.hud.showPrompt(target.text, 'F');
-    else if (!game.player.vehicle && game.player.nearestVehicle(4.2)) {
-      const vehicle = game.player.nearestVehicle(4.2);
-      game.hud.showPrompt(vehicle.driver === 'traffic' ? game.lang('carjack') : game.lang('enterVehicle'), 'E');
-    } else if (game.player.vehicle) {
-      game.hud.showPrompt(game.lang('exitVehicle'), 'E');
+    // During the WASTED crane shot the world keeps living but the
+    // player cannot interact; prompts stay hidden until respawn.
+    if (!game.wanted.wastedActive) {
+      const target = scanInteract();
+      if (pressed.has('interact')) doInteract(target);
+      if (target) game.hud.showPrompt(target.text, 'F');
+      else if (!game.player.vehicle && game.player.nearestVehicle(4.2)) {
+        const vehicle = game.player.nearestVehicle(4.2);
+        game.hud.showPrompt(vehicle.driver === 'traffic' ? game.lang('carjack') : game.lang('enterVehicle'), 'E');
+      } else if (game.player.vehicle) {
+        game.hud.showPrompt(game.lang('exitVehicle'), 'E');
+      } else {
+        game.hud.hidePrompt();
+      }
     } else {
       game.hud.hidePrompt();
     }
@@ -402,10 +410,15 @@ function boot() {
     }
     insideSafehouse = nearSafehouse;
 
-    // Camera follows the player or the car.
-    const focus = { x: game.player.x, y: game.player.y, z: game.player.z };
-    const heading = game.player.vehicle ? game.player.vehicle.heading : game.player.heading;
-    game.cameraRig.updateFollow(dt, focus, heading, game.player.speed, !!game.player.vehicle, game.player.aiming);
+    // Camera follows the player or the car — or runs the WASTED crane
+    // shot until the respawn flow ends it.
+    if (game.wanted.wastedActive) {
+      game.wanted.updateWasted(dt);
+    } else {
+      const focus = { x: game.player.x, y: game.player.y, z: game.player.z };
+      const heading = game.player.vehicle ? game.player.vehicle.heading : game.player.heading;
+      game.cameraRig.updateFollow(dt, focus, heading, game.player.speed, !!game.player.vehicle, game.player.aiming);
+    }
 
     // Headlights.
     const lightsOn = game.player.lightsOn && game.player.vehicle;

@@ -26,6 +26,10 @@ export function createAudio(game) {
   const engineVoices = new Map();
   let sirenVoice = null;
   let skidVoice = null;
+  // Play counters: incremented only when nodes are actually scheduled,
+  // so playtests can assert a sound really fired (never a fake count).
+  let sfxCount = 0;
+  const sfxCounts = {};
 
   function init() {
     if (ctx) {
@@ -137,6 +141,8 @@ export function createAudio(game) {
       if (gain <= 0) return;
       const when = ctx.currentTime + 0.005;
       const g = (recipe.gain || 0.4) * gain;
+      sfxCount += 1;
+      sfxCounts[name] = (sfxCounts[name] || 0) + 1;
       if (recipe.tones) {
         recipe.tones.forEach((freq, i) => tone(when + i * 0.07, freq, recipe.dur / recipe.tones.length + 0.06, g, 'triangle', sfxBus));
         return;
@@ -352,6 +358,8 @@ export function createAudio(game) {
   return {
     init,
     get ready() { return !!ctx && ctx.state === 'running'; },
+    get sfxCount() { return sfxCount; },
+    sfxCountFor(name) { return sfxCounts[name] || 0; },
     applyVolumes,
     playSfx,
     setMusicMode,

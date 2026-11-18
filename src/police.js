@@ -5,7 +5,7 @@
 
 import * as THREE from 'three';
 import { clamp, dampAngle, dist2 } from './utils.js';
-import { animateWalker, buildWalkerMesh } from './pedestrians.js';
+import { animateWalker, attachWeaponMesh, buildWalkerMesh } from './pedestrians.js';
 
 const DESIRED = [2, 1, 2, 4, 6, 8];
 
@@ -17,6 +17,9 @@ export function createPolice(game) {
   let heli = null;
   let heliFireTimer = 0;
   let playerFiredAt = -99;
+  // Pinned during the WASTED crane shot: the helicopter must stay up
+  // even at zero stars so the camera can end on it.
+  let heliPinned = false;
 
   game.events.on('gunshot', ({ shooter }) => {
     if (shooter === 'player') playerFiredAt = game.time;
@@ -24,6 +27,7 @@ export function createPolice(game) {
 
   function spawnOfficer(unit, x, z) {
     const parts = buildWalkerMesh(0x22303f, 0xe0b58e, 0x1c1c1c, 0x22303f);
+    attachWeaponMesh(parts, 'p9');
     parts.group.position.set(x, 0, z);
     game.scene.add(parts.group);
     const officer = {
@@ -141,6 +145,20 @@ export function createPolice(game) {
     return dist2(heli.group.position.x, heli.group.position.z, game.player.x, game.player.z) < 14;
   }
 
+  /** Guarantee a helicopter overhead (WASTED crane shot): spawn one if
+   *  none is active, pin it so the zero-star cleanup cannot remove it,
+   *  and place it near overhead so the crane ends looking at it. */
+  function ensureHeliOverhead() {
+    if (!heli) heli = buildHeli();
+    heliPinned = true;
+    heli.group.position.set(game.player.x + 10, 55, game.player.z + 10);
+    heli.angle = Math.atan2(10, 10);
+  }
+
+  function releaseHeli() {
+    heliPinned = false;
+  }
+
   function hurtOfficer(officer, amount, byPlayer) {
     if (officer.state === 'dead') return;
     officer.hp -= amount;
@@ -229,7 +247,7 @@ export function createPolice(game) {
       heli = buildHeli();
       game.hud.notify(game.settings.language === 'id' ? 'Helikopter polisi di udara!' : 'Police helicopter overhead!', 'bad');
     }
-    if (stars < 4 && heli) {
+    if (stars < 4 && heli && !heliPinned) {
       game.scene.remove(heli.group);
       game.scene.remove(heli.spot);
       heli = null;
@@ -374,11 +392,18 @@ export function createPolice(game) {
       game.scene.remove(heli.spot);
       heli = null;
     }
+    heliPinned = false;
     game.audio.setSiren(false);
   }
 
   return {
     units, update, reset, hurtOfficer, spotlightOnPlayer, forceRoadblock: setRoadblock,
+    ensureHeliOverhead, releaseHeli,
     get heliActive() { return !!heli; },
+    get heliPos() {
+      if (!heli) return null;
+      const p = heli.group.position;
+      return { x: p.x, y: p.y, z: p.z };
+    },
   };
 }

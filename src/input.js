@@ -12,6 +12,7 @@ export function createInput(game) {
   let wheelDelta = 0;
   let fireHeld = false;
   let aimHeld = false;
+  let lastTouchAt = 0;
   let mouseX = 0;
   let mouseY = 0;
   let dragging = false;
@@ -65,6 +66,21 @@ export function createInput(game) {
     dragging = true;
     lastDragX = event.clientX;
     lastDragY = event.clientY;
+  });
+  // Mouse buttons, per button: pointerdown fires only for the FIRST
+  // button held, so aiming (right) and then pressing fire (left) never
+  // produced a second pointerdown and the gun never fired while aiming.
+  // mousedown fires for every button press, in either order. Touch
+  // drags fire a compatibility mousedown afterwards; the guard below
+  // (stamped by the touch look handler) swallows those.
+  canvas.addEventListener('mousedown', (event) => {
+    if (performance.now() - lastTouchAt < 500) return;
+    if (event.button === 0) fireHeld = true;
+    if (event.button === 2) aimHeld = true;
+  });
+  window.addEventListener('mouseup', (event) => {
+    if (event.button === 0) fireHeld = false;
+    if (event.button === 2) aimHeld = false;
   });
   window.addEventListener('pointerup', (event) => {
     if (event.button === 0) fireHeld = false;
@@ -131,16 +147,23 @@ export function createInput(game) {
     if (!el) return;
     el.addEventListener('pointerdown', (event) => {
       touchSeen = true;
+      el.classList.add('held');
       down();
       event.preventDefault();
     });
-    el.addEventListener('pointerup', () => { if (up) up(); });
-    el.addEventListener('pointercancel', () => { if (up) up(); });
+    const release = () => {
+      el.classList.remove('held');
+      if (up) up();
+    };
+    el.addEventListener('pointerup', release);
+    el.addEventListener('pointercancel', release);
+    el.addEventListener('pointerleave', release);
   }
   bindTouchButton('btnFire', () => { fireHeld = true; }, () => { fireHeld = false; });
   bindTouchButton('btnAction', () => press('enter'));
   bindTouchButton('btnInteract', () => press('interact'));
   bindTouchButton('btnBrake', () => { touchHeld.add('handbrake'); }, () => { touchHeld.delete('handbrake'); });
+  bindTouchButton('btnRun', () => { touchHeld.add('sprint'); }, () => { touchHeld.delete('sprint'); });
   bindTouchButton('btnMapT', () => press('map'));
   bindTouchButton('btnPauseT', () => press('pause'));
 
@@ -152,6 +175,7 @@ export function createInput(game) {
   canvas.addEventListener('pointerdown', (event) => {
     if (event.pointerType !== 'touch') return;
     touchSeen = true;
+    lastTouchAt = performance.now();
     camPointer = event.pointerId;
     camLastX = event.clientX;
     camLastY = event.clientY;
@@ -191,7 +215,13 @@ export function createInput(game) {
       let t = 0;
       if (keys.has('KeyW') || keys.has('ArrowUp')) t += 1;
       if (keys.has('KeyS') || keys.has('ArrowDown')) t -= 1;
-      if (joy.active) t += -joy.y;
+      if (joy.active) {
+        const forward = -joy.y;
+        // Full-throttle detent: pushing the stick 75%+ forward counts
+        // as full throttle, so touch drivers can actually reach a
+        // car's top speed instead of hovering at partial throttle.
+        t += forward >= 0.75 ? 1 : forward;
+      }
       return Math.max(-1, Math.min(1, t));
     },
     steer() {
@@ -202,7 +232,7 @@ export function createInput(game) {
       return Math.max(-1, Math.min(1, s));
     },
     sprint() {
-      return keys.has('ShiftLeft') || keys.has('ShiftRight');
+      return keys.has('ShiftLeft') || keys.has('ShiftRight') || touchHeld.has('sprint');
     },
     handbrake() {
       return keys.has('Space') || touchHeld.has('handbrake');

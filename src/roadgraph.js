@@ -122,6 +122,9 @@ export function createRoadGraph() {
   function route(x, z, tx, tz) {
     const start = nearestNode(x, z);
     const goal = nearestNode(tx, tz);
+    // Same intersection at both ends: the direct line is the route.
+    // Skips a pointless Dijkstra and a duplicate-node detour.
+    if (start === goal) return [{ x, z }, { x: tx, z: tz }];
     const path = dijkstra(start, goal);
     if (!path) return [{ x, z }, { x: tx, z: tz }];
     const points = [{ x, z }];

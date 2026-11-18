@@ -8,6 +8,9 @@ export const SFX_RECIPES = {
   scatter: { noise: 0.16, noiseHz: 1500, thump: 0.2, thumpHz: 95, gain: 0.7 },
   rifle: { noise: 0.11, noiseHz: 2200, thump: 0.15, thumpHz: 120, gain: 0.6 },
   punch: { noise: 0.05, noiseHz: 700, thump: 0.09, thumpHz: 110, gain: 0.4 },
+  swing: { noise: 0.08, noiseHz: 1400, thump: 0, thumpHz: 0, gain: 0.22 },
+  hit: { tones: [2400], dur: 0.05, gain: 0.2 },
+  casing: { clicks: [0], gain: 0.1 },
   reload: { clicks: [0, 0.12, 0.3], gain: 0.3 },
   explosion: { noise: 0.9, noiseHz: 500, thump: 0.7, thumpHz: 55, gain: 0.9 },
   glass: { noise: 0.18, noiseHz: 5200, thump: 0, thumpHz: 0, gain: 0.4 },
@@ -31,6 +34,8 @@ export const ENGINE_PROFILES = {
   sport: { base: 62, top: 190, wave: 'sawtooth', gain: 0.13 },
   v8: { base: 42, top: 115, wave: 'square', gain: 0.14 },
   diesel: { base: 38, top: 95, wave: 'square', gain: 0.13 },
+  // Supercars: high-revving wail that climbs far past the sport profile.
+  hyper: { base: 78, top: 270, wave: 'sawtooth', gain: 0.13 },
 };
 
 // Music: 8-step patterns per stem, semitone offsets from A2 (110 Hz).

@@ -33,6 +33,7 @@ export function createHud(game) {
   const ammoReserve = $('ammoReserve');
   const speedo = $('speedo');
   const speedVal = $('speedVal');
+  const speedBarFill = $('speedBarFill');
   const carHealthFill = $('carHealthFill');
   const crosshair = $('crosshair');
   const hitmarker = $('hitmarker');
@@ -248,7 +249,8 @@ export function createHud(game) {
       speedo.classList.remove('hidden');
       const speed = Math.hypot(player.vehicle.vx, player.vehicle.vz) * 3.6;
       speedVal.textContent = String(Math.round(speed));
-      carHealthFill.style.width = `${clamp(player.vehicle.integrity, 0, 100)}%`;
+      speedBarFill.style.width = `${clamp(Math.hypot(player.vehicle.vx, player.vehicle.vz) / player.vehicle.def.topSpeed * 100, 0, 100)}%`;
+      carHealthFill.style.width = `${clamp(player.vehicle.integrity / player.vehicle.maxIntegrity * 100, 0, 100)}%`;
     } else {
       speedo.classList.add('hidden');
     }
@@ -257,6 +259,7 @@ export function createHud(game) {
     const moving = player.vehicle ? Math.min(1, Math.abs(player.vehicle.speed) / 30) : (axis.x !== 0 || axis.y !== 0 ? 0.6 : 0);
     const gap = 7 + game.combat.bloom * 26 + moving * 5 + (player.aiming ? -3 : 0);
     crosshair.style.setProperty('--gap', `${clamp(gap, 4, 34)}px`);
+    crosshair.classList.toggle('aiming', player.aiming);
     crosshair.classList.toggle('hidden', player.currentWeapon === 'fists' && !player.vehicle);
     if (game.time > hitmarkerUntil) hitmarker.classList.remove('on');
     // Damage vignette + flash decay.

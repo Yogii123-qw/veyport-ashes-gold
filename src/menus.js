@@ -119,8 +119,8 @@ export function createMenus(game) {
   function openCredits() {
     creditsOpen = true;
     $('creditsControls').textContent = lang() === 'id'
-      ? 'Kontrol: WASD gerak/setir, Shift lari, Spasi drift/lompat, E masuk kendaraan, F interaksi, klik kiri tembak, R isi ulang, Q medkit, 1–5 senjata, M peta, Esc jeda, H klakson, L lampu.'
-      : 'Controls: WASD move/steer, Shift run, Space drift/jump, E enter vehicle, F interact, left click fire, R reload, Q medkit, 1–5 weapons, M map, Esc pause, H horn, L lights.';
+      ? 'Kontrol: WASD gerak/setir, Shift lari, Spasi drift/lompat, E masuk kendaraan, F interaksi, klik kiri tembak, klik kanan bidik, R isi ulang, Q medkit, 1–5 senjata, M peta, Esc jeda, H klakson, L lampu. Sentuh: joystick gerak, tahan LARI untuk lari, seret layar untuk melihat, TEMBAK untuk menembak.'
+      : 'Controls: WASD move/steer, Shift run, Space drift/jump, E enter vehicle, F interact, left click fire, right click aim, R reload, Q medkit, 1–5 weapons, M map, Esc pause, H horn, L lights. Touch: joystick to move, hold RUN to run, drag to look, FIRE to shoot.';
     $('creditsBox').classList.remove('hidden');
   }
   $('btnCredits').addEventListener('click', openCredits);

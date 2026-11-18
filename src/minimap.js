@@ -176,7 +176,10 @@ export function createMinimap(game) {
       }
     }
     if (game.police.heliActive && seen) {
-      drawBlip(g, toX(game.player.x), toZ(game.player.z), 'police');
+      // The blip sits where the helicopter actually is, not on the
+      // player — the rotor is audible, so its position is fair game.
+      const heli = game.police.heliPos;
+      drawBlip(g, toX(heli ? heli.x : game.player.x), toZ(heli ? heli.z : game.player.z), 'police');
     }
   }
 
@@ -201,9 +204,11 @@ export function createMinimap(game) {
       routeTimer = 2;
       if (effectiveTarget() && dist2(game.player.x, game.player.z, routeAt.x, routeAt.z) > 25) refreshRoute();
     }
-    // Auto-zoom out with speed.
+    // Auto-zoom out with speed: smooth and proportional, so a supercar
+    // at full throttle sees far further ahead than a parked car.
     const speed = game.player.vehicle ? Math.abs(game.player.vehicle.speed) : 0;
-    const targetScale = clamp(0.85 * zoom * (speed > 22 ? 0.55 : 1), 0.3, 2.2);
+    const zoomOut = 1 / (1 + Math.max(0, speed - 15) * 0.012);
+    const targetScale = clamp(0.85 * zoom * zoomOut, 0.3, 2.2);
     scale += (targetScale - scale) * Math.min(1, dt * 2);
     const size = 220;
     const cx = game.player.x;

@@ -90,6 +90,19 @@ export const TIME_TRIALS = [
   { id: 'trialHarbor', name: { en: 'Harbor Run', id: 'Lari Pelabuhan' }, start: [-540, 300], checkpoints: [[-300, 300], [-150, 150], [150, 150], [300, 300], [540, 300]] },
 ];
 
+// Fixed showcase parking: one of each supercar, parked where a new
+// player can find it early — the Docks near spawn, Palm Marina, Neon
+// Mile, Villa Marisol, and the Bazaar. Each sits 5.2 m off a road
+// centreline (the same offset random parked cars use), so no building,
+// tree, or POI collider can ever overlap it. Stealable like any car.
+export const SHOWCASE_SPOTS = [
+  { defId: 'obsidian', x: -360, z: 5.2, heading: Math.PI / 2 },
+  { defId: 'seraph', x: 505, z: -294.8, heading: Math.PI / 2 },
+  { defId: 'lumen', x: 144.8, z: -60, heading: 0 },
+  { defId: 'quasar', x: 444.8, z: -380, heading: 0 },
+  { defId: 'osprey', x: 300, z: 155.2, heading: Math.PI / 2 },
+];
+
 export const PLAYER_SPAWN = { x: -360, z: 40, heading: Math.PI / 2 };
 
 // Points the city generator must keep clear of buildings and props:

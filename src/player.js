@@ -5,7 +5,7 @@
 
 import { ARMOR, WEAPONS, weaponById } from '../data/weaponsData.js';
 import { clamp, dampAngle, dist2, forwardOf } from './utils.js';
-import { animateWalker, buildWalkerMesh } from './pedestrians.js';
+import { animateWalker, attachWeaponMesh, buildWalkerMesh } from './pedestrians.js';
 
 const WALK_SPEED = 5;
 const RUN_SPEED = 8.5;
@@ -38,7 +38,18 @@ export function createPlayer(game) {
   function resetWeapons() {
     player.weapons = { fists: { mag: 0, reserve: 0 } };
     giveWeapon('p9', true);
-    player.currentWeapon = 'fists';
+    // A new game starts with the pistol EQUIPPED and visible in hand,
+    // not buried behind fists: the gun must be obvious from the first
+    // second of play.
+    player.currentWeapon = 'p9';
+  }
+
+  let lastWeaponMesh = null;
+  function syncWeaponMesh() {
+    if (player.currentWeapon !== lastWeaponMesh) {
+      lastWeaponMesh = player.currentWeapon;
+      attachWeaponMesh(parts, player.currentWeapon);
+    }
   }
 
   function hurt(amount, source) {
@@ -231,7 +242,7 @@ export function createPlayer(game) {
         }
         if (vehicle.def && vehicle.integrity <= 0) {
           // Burning car: the player must get out before it blows.
-          game.hud.notify(game.lang('wasted') === 'WASTED' ? 'Get out — the car is burning!' : 'Keluar — mobil terbakar!', 'bad');
+          game.hud.notify(game.lang('carBurning'), 'bad');
         }
       }
     }
@@ -323,6 +334,7 @@ export function createPlayer(game) {
         game.audio.playSfx('click');
       }
     }
+    syncWeaponMesh();
   }
 
   function teleport(x, z, heading) {
@@ -353,11 +365,13 @@ export function createPlayer(game) {
     player.medkits = 1;
     player.stagger = 0;
     resetWeapons();
+    syncWeaponMesh();
     teleport(spawn.x, spawn.z, spawn.heading);
     parts.group.visible = true;
   }
 
   resetWeapons();
+  syncWeaponMesh();
 
   return {
     ...player,

@@ -4,7 +4,7 @@
 // player's contract reputation moves them up or down — failure costs
 // real standing, so the next board pays less.
 
-import { ACTIVITY_REWARDS, CONTRACT_CLIENTS, CONTRACT_TYPES, REPUTATION, reputationMultiplier } from '../data/contractsData.js';
+import { ACTIVITY_REWARDS, CONTRACT_CLIENTS, CONTRACT_TYPES, REPO_SUPERCAR_BONUS, REPO_VEHICLE_TYPES, REPUTATION, reputationMultiplier } from '../data/contractsData.js';
 import { CACHES, POIS, STUNT_JUMPS, TIME_TRIALS, poiById } from '../data/cityData.js';
 import { dist2, mulberry32, pick } from './utils.js';
 import { animateWalker, buildWalkerMesh } from './pedestrians.js';
@@ -87,9 +87,11 @@ export function createContracts(game) {
       setBeacon(offer.pickup.x, offer.pickup.z, 0xff5a4a);
       game.hud.setObjective(text(CONTRACT_TYPES.find((t) => t.id === 'vigilante').name), offer.pickup.x, offer.pickup.z);
     } else if (offer.type === 'repo') {
-      const types = ['pico', 'swift', 'bulldog', 'vagabond'];
-      const defId = types[Math.floor(Math.random() * types.length)];
+      const defId = REPO_VEHICLE_TYPES[Math.floor(Math.random() * REPO_VEHICLE_TYPES.length)];
       targetVehicle = game.vehicles.spawn(defId, offer.pickup.x, offer.pickup.z, 0, { mission: true });
+      if (targetVehicle && targetVehicle.def.cls === 'supercar') {
+        active.reward = Math.round(active.reward * REPO_SUPERCAR_BONUS);
+      }
       const yard = poiById('chopshop');
       active.drop = { x: yard.x, z: yard.z };
       setBeacon(offer.pickup.x, offer.pickup.z);

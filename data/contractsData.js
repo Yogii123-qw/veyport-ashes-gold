@@ -44,6 +44,12 @@ export function reputationMultiplier(reputation) {
   return REPUTATION.rewardFloor + t * (REPUTATION.rewardCeil - REPUTATION.rewardFloor);
 }
 
+// Repo jobs: the vehicle pool the yard asks for, and the bonus paid
+// when the target is a supercar — stealing one is the same job, but
+// the yard pays for the risk of scratching it.
+export const REPO_VEHICLE_TYPES = ['pico', 'swift', 'bulldog', 'vagabond', 'seraph'];
+export const REPO_SUPERCAR_BONUS = 1.5;
+
 export const ACTIVITY_REWARDS = {
   cache: 100, cacheBonus: 1000,
   stuntBase: 50, stuntPerMetre: 6, stuntPerSecond: 40, stuntCap: 300,

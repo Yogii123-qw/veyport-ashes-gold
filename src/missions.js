@@ -189,6 +189,10 @@ export function createMissions(game) {
     if (!active) return;
     const mission = active.mission;
     game.progress.stats.missionsFailed += 1;
+    // A failed stage must not leave its timer or counter on the HUD:
+    // the results screen is the only thing the player should see.
+    game.hud.setTimer(null);
+    game.hud.setCounter(null);
     game.gangs.removeTag(active.tag);
     cleanupStageArtifacts();
     const failedId = mission.id;
@@ -420,6 +424,7 @@ export function createMissions(game) {
       case 'race': {
         active.data.timer -= dt;
         game.hud.setTimer(active.data.timer);
+        game.hud.setCounter(stage.checkpoints.length - active.data.gateIndex);
         if (active.data.timer <= 0) {
           failActive('timeOut');
           return;
@@ -430,6 +435,7 @@ export function createMissions(game) {
           game.audio.playSfx('cash', game.player.x, game.player.z);
           if (active.data.gateIndex >= stage.checkpoints.length) {
             game.hud.setTimer(null);
+            game.hud.setCounter(null);
             advance();
           } else {
             const next = stage.checkpoints[active.data.gateIndex];

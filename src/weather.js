@@ -16,6 +16,7 @@ const TRANSITIONS = {
 const GRIP = { clear: 1, cloudy: 1, rain: 0.85, storm: 0.75 };
 const VISION = { clear: 1, cloudy: 0.95, rain: 0.8, storm: 0.65 };
 const RAIN_INTENSITY = { clear: 0, cloudy: 0, rain: 0.6, storm: 1 };
+const SKY_GRAY = { clear: 0, cloudy: 0.25, rain: 0.45, storm: 0.7 };
 
 export function createWeather(game) {
   let hours = 8;
@@ -121,25 +122,27 @@ export function createWeather(game) {
     }
     hemi.intensity = lerp(0.9, 0.25, nightFactor);
     ambient.intensity = lerp(0.15, 0.08, nightFactor);
-    // Sky + fog follow weather and night.
+    // Sky + fog follow the weather BLEND, not the new state alone, so
+    // a storm rolling in darkens and closes the fog over five seconds
+    // instead of popping in one frame.
     const sky = game.scene.background;
     const daySky = [0.74, 0.85, 0.9];
     const nightSky = [0.03, 0.05, 0.09];
     const stormSky = [0.32, 0.36, 0.4];
-    const weatherGray = current === 'storm' ? 0.7 : current === 'rain' ? 0.45 : current === 'cloudy' ? 0.25 : 0;
+    const rainBlend = lerp(RAIN_INTENSITY[previous], RAIN_INTENSITY[current], blend);
+    const weatherGray = lerp(SKY_GRAY[previous], SKY_GRAY[current], blend);
     const mixed = daySky.map((v, i) => lerp(lerp(v, stormSky[i], weatherGray * (1 - nightFactor)), nightSky[i], nightFactor));
     if (sky && sky.isColor) sky.setRGB(mixed[0], mixed[1], mixed[2]);
     if (game.scene.fog) {
       game.scene.fog.color.setRGB(mixed[0], mixed[1], mixed[2]);
-      const near = current === 'storm' ? 60 : current === 'rain' ? 120 : 300;
-      const far = current === 'storm' ? 380 : current === 'rain' ? 650 : 1100;
+      const near = lerp(300, 60, rainBlend);
+      const far = lerp(1100, 380, rainBlend);
       game.scene.fog.near += (near - game.scene.fog.near) * Math.min(1, dt);
       game.scene.fog.far += (far - game.scene.fog.far) * Math.min(1, dt);
     }
     // Rain + lightning.
-    const rainTarget = lerp(RAIN_INTENSITY[previous], RAIN_INTENSITY[current], blend);
-    game.particles.setRain(rainTarget);
-    game.audio.setRain(rainTarget);
+    game.particles.setRain(rainBlend);
+    game.audio.setRain(rainBlend);
     if (current === 'storm') {
       lightningTimer -= dt;
       if (lightningTimer <= 0) {

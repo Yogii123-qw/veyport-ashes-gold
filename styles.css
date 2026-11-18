@@ -81,7 +81,8 @@ button { font-family: inherit; color: inherit; }
 #ammoMag { font-size: 24px; color: var(--ink); font-weight: 700; margin-right: 6px; }
 #ammoMag.low { color: var(--bad); }
 #speedo { margin-top: 6px; }
-#speedVal { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+#speedVal { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; }
+#speedBarFill { background: var(--amber); }
 .speedUnit { font-size: 12px; color: var(--ink-dim); margin-left: 5px; }
 
 #crosshair { position: absolute; left: 50%; top: 50%; width: 0; height: 0; --gap: 9px; }
@@ -94,7 +95,7 @@ button { font-family: inherit; color: inherit; }
 #crosshair.aiming { --gap: 6px; }
 #crosshair.aiming span { background: var(--amber-hot); }
 #hitmarker { position: absolute; left: 50%; top: 50%; width: 26px; height: 26px; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; border: 2px solid #fff; }
-#hitmarker.show { opacity: 1; transition: none; }
+#hitmarker.on { opacity: 1; transition: none; }
 #hitmarker.kill { border-color: var(--signal); }
 
 #notices { position: absolute; right: 14px; top: 32%; width: 300px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
@@ -130,6 +131,8 @@ button { font-family: inherit; color: inherit; }
 .tBtn { min-width: 56px; min-height: 56px; border-radius: 50%; border: 2px solid rgba(255, 255, 255, 0.4); background: rgba(10, 15, 20, 0.55); font-size: 12px; font-weight: 700; letter-spacing: 0.05em; touch-action: none; }
 .tBtn.big { width: 76px; height: 76px; grid-column: span 2; justify-self: center; background: rgba(229, 72, 47, 0.55); font-size: 15px; }
 .tBtn:active { transform: scale(0.94); background: var(--amber); color: #1a1206; }
+.tBtn.held { transform: scale(0.94); background: var(--amber); color: #1a1206; }
+.tBtn.current { background: var(--amber); color: #1a1206; border-color: var(--amber-hot); }
 #touchTop { position: absolute; right: 16px; top: 100px; display: flex; gap: 8px; pointer-events: auto; }
 .tBtn.small { min-width: 52px; min-height: 40px; border-radius: 6px; }
 #touchWeapons { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); display: flex; gap: 6px; pointer-events: auto; }
@@ -245,15 +248,18 @@ button { font-family: inherit; color: inherit; }
   #hud { font-size: 13px; }
   #statsPlate { min-width: 180px; padding: 8px 10px; top: 10px; left: 10px; }
   #cash { font-size: 18px; }
+  /* Narrow screens: the centered district block collided with the
+     stats plate, so it docks top-right, right-aligned, instead. */
+  #topCenter { top: 8px; left: auto; right: 10px; transform: none; text-align: right; max-width: 172px; }
+  #compassCanvas { width: 150px; height: 16px; margin: 0 0 0 auto; }
+  #district { font-size: 14px; letter-spacing: 0.08em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #clockRow { justify-content: flex-end; font-size: 12px; }
   #minimapCanvas { width: 148px; height: 148px; }
   #minimapHint { display: none; }
   #objective { top: 96px; min-width: 0; width: 86vw; padding: 8px 10px; }
   #objTitle { font-size: 16px; }
   #weaponPlate { min-width: 0; right: 10px; bottom: 10px; padding: 8px 10px; }
   #notices { width: 220px; top: 26%; }
-  #topCenter { top: 6px; }
-  #compassCanvas { width: 260px; height: 20px; }
-  #district { font-size: 16px; }
   #dialogBox { margin-bottom: 12px; padding: 10px 12px; }
   #portraitCanvas { width: 64px; height: 64px; }
   #dialogText { font-size: 15px; }

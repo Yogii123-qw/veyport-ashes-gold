@@ -6,6 +6,7 @@
 
 import * as THREE from 'three';
 import { CIVILIAN_TYPES, TRAFFIC_WEIGHTS, VEHICLES } from '../data/vehiclesData.js';
+import { SHOWCASE_SPOTS } from '../data/cityData.js';
 import { clamp, dist2, forwardOf } from './utils.js';
 
 let nextVehicleId = 1;
@@ -18,16 +19,23 @@ const trimMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.7
 const lightFrontMat = new THREE.MeshStandardMaterial({ color: 0xfff6d8, emissive: 0xffedb8, emissiveIntensity: 0.3 });
 const lightRearMat = new THREE.MeshStandardMaterial({ color: 0xaa2222, emissive: 0xcc2222, emissiveIntensity: 0.4 });
 
-// Merge a list of translated boxes into one non-indexed geometry so a
-// vehicle spends one draw call on all of its bumpers / lamps instead
-// of one per box.
+// Merge a list of translated (and optionally rotated) boxes into one
+// non-indexed geometry so a vehicle spends one draw call on all of its
+// body-colored detail and one on all of its trim, instead of one per
+// box. Parts: {x,y,z, w,h,d, rx,ry,rz}.
 function mergeBoxes(parts) {
   const positions = [];
   const normals = [];
   const uvs = [];
+  const matrix = new THREE.Matrix4();
+  const quat = new THREE.Quaternion();
+  const euler = new THREE.Euler();
   for (const p of parts) {
     const geo = new THREE.BoxGeometry(p.w, p.h, p.d).toNonIndexed();
-    geo.translate(p.x, p.y, p.z);
+    euler.set(p.rx || 0, p.ry || 0, p.rz || 0);
+    quat.setFromEuler(euler);
+    matrix.compose(new THREE.Vector3(p.x, p.y, p.z), quat, new THREE.Vector3(1, 1, 1));
+    geo.applyMatrix4(matrix);
     positions.push(...geo.attributes.position.array);
     normals.push(...geo.attributes.normal.array);
     uvs.push(...geo.attributes.uv.array);
@@ -47,12 +55,64 @@ export function buildVehicleMesh(def, colorHex) {
   const W = def.width;
   const isVan = def.cls === 'van' || def.cls === 'armored';
   const isTruck = def.cls === 'truck';
-  const body = new THREE.Mesh(new THREE.BoxGeometry(W, 0.55, L), bodyMat);
-  body.position.y = 0.58;
+  const isSuper = def.cls === 'supercar';
+  const style = def.bodyStyle || {};
+  // Supercars sit lower and wider; everything else keeps the standard
+  // body height so the fleet still reads as distinct classes.
+  const bodyH = isSuper ? 0.42 : 0.55;
+  const bodyY = isSuper ? 0.48 : 0.58;
+  const topY = bodyY + bodyH / 2;
+
+  // Body-colored detail, merged into the body mesh: the shell, fender
+  // flares over all four wheels, skirts, spoilers, and class extras.
+  // Same draw calls as the old plain box — the detail is free.
+  const bodyParts = [{ w: W, h: bodyH, d: L, x: 0, y: bodyY, z: 0 }];
+  const flareY = bodyY + bodyH * 0.32;
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      bodyParts.push({ w: 0.2, h: 0.16, d: 1.0, x: sx * (W / 2 + 0.03), y: flareY, z: sz * L * 0.32 });
+    }
+  }
+  if (isSuper) {
+    for (const sx of [-1, 1]) {
+      bodyParts.push({ w: 0.1, h: 0.14, d: L * 0.55, x: sx * (W / 2 + 0.02), y: 0.32, z: 0 });
+    }
+    if (style.nose === 'wedge') {
+      // Wedge nose: the front section dips toward the road.
+      bodyParts.push({ w: W * 0.96, h: 0.3, d: L * 0.26, x: 0, y: 0.42, z: L * 0.38, rx: -0.14 });
+    }
+    if (style.spoiler === 'wing') {
+      bodyParts.push({ w: W * 0.92, h: 0.06, d: 0.42, x: 0, y: 1.0, z: -L / 2 + 0.25 });
+    } else if (style.spoiler === 'ducktail') {
+      bodyParts.push({ w: W * 0.9, h: 0.08, d: 0.3, x: 0, y: topY + 0.08, z: -L / 2 + 0.1, rx: -0.25 });
+    } else if (style.spoiler === 'lip') {
+      bodyParts.push({ w: W * 0.85, h: 0.05, d: 0.2, x: 0, y: topY + 0.02, z: -L / 2 + 0.05 });
+    }
+    if (style.roof === 'coupe') {
+      // Canopy roof panel over the glasshouse.
+      bodyParts.push({ w: W * 0.6, h: 0.06, d: L * 0.22, x: 0, y: 1.06, z: -L * 0.08 });
+    } else if (style.roof === 'roadster') {
+      // Headrest humps behind the two seats.
+      for (const sx of [-1, 1]) {
+        bodyParts.push({ w: 0.34, h: 0.18, d: 0.4, x: sx * 0.42, y: topY + 0.04, z: -L * 0.12 });
+      }
+    }
+  }
+  if (def.cls === 'muscle') {
+    // Hood scoop: the muscle car's signature.
+    bodyParts.push({ w: 0.5, h: 0.1, d: 0.6, x: 0, y: topY + 0.03, z: L * 0.22 });
+  }
+  const body = new THREE.Mesh(mergeBoxes(bodyParts), bodyMat);
   body.castShadow = true;
   group.add(body);
+
   let cabin;
-  if (isVan || def.cls === 'police' && def.id === 'cpdvan') {
+  if (isSuper && style.roof === 'roadster') {
+    cabin = new THREE.Mesh(new THREE.BoxGeometry(W * 0.8, 0.32, 0.06), glassMat);
+    cabin.position.set(0, topY + 0.16, L * 0.05);
+    cabin.rotation.x = -0.4;
+    group.add(cabin);
+  } else if (isVan || def.cls === 'police' && def.id === 'cpdvan') {
     cabin = new THREE.Mesh(new THREE.BoxGeometry(W * 0.96, 0.85, L * 0.62), bodyMat);
     cabin.position.set(0, 1.28, -L * 0.12);
     cabin.castShadow = true;
@@ -68,18 +128,54 @@ export function buildVehicleMesh(def, colorHex) {
     const bed = new THREE.Mesh(new THREE.BoxGeometry(W * 0.94, 0.7, L * 0.55), trimMat);
     bed.position.set(0, 1.2, -L * 0.18);
     group.add(bed);
+  } else if (isSuper) {
+    cabin = new THREE.Mesh(new THREE.BoxGeometry(W * 0.68, 0.38, L * 0.4), glassMat);
+    cabin.position.set(0, 0.85, -L * 0.06);
+    cabin.castShadow = true;
+    group.add(cabin);
   } else {
     cabin = new THREE.Mesh(new THREE.BoxGeometry(W * 0.82, 0.5, L * 0.45), glassMat);
     cabin.position.set(0, 1.08, -L * 0.05);
     cabin.castShadow = true;
     group.add(cabin);
   }
-  // Bumpers and lights: one merged mesh per material.
-  const bumpers = new THREE.Mesh(mergeBoxes([
+
+  // Trim, merged into one mesh: bumpers, grille, lower intake, mirrors,
+  // side trim, door shut-lines, spoiler struts, side intakes, rails.
+  const trimParts = [
     { w: W * 1.02, h: 0.22, d: 0.18, x: 0, y: 0.42, z: L / 2 },
     { w: W * 1.02, h: 0.22, d: 0.18, x: 0, y: 0.42, z: -L / 2 },
-  ]), trimMat);
-  group.add(bumpers);
+    { w: W * 0.55, h: 0.14, d: 0.06, x: 0, y: isSuper ? 0.52 : 0.6, z: L / 2 + 0.02 },
+    { w: W * 0.7, h: 0.1, d: 0.05, x: 0, y: 0.36, z: L / 2 + 0.02 },
+  ];
+  const mirrorY = isSuper ? 0.82 : 1.02;
+  for (const sx of [-1, 1]) {
+    trimParts.push({ w: 0.1, h: 0.09, d: 0.12, x: sx * (W / 2 + 0.06), y: mirrorY, z: L * 0.16 });
+    trimParts.push({ w: 0.03, h: 0.07, d: L * 0.7, x: sx * (W / 2 + 0.015), y: 0.5, z: 0 });
+    // Door shut-lines: diagonal for scissor/dihedral doors, straight
+    // for everything else — the seam is what sells the door type.
+    const seamRx = style.doors === 'scissor' ? 0.55 : style.doors === 'dihedral' ? -0.4 : 0;
+    trimParts.push({ w: 0.02, h: 0.34, d: 0.03, x: sx * (W / 2 + 0.02), y: 0.6, z: L * 0.12, rx: seamRx });
+    trimParts.push({ w: 0.02, h: 0.34, d: 0.03, x: sx * (W / 2 + 0.02), y: 0.6, z: -L * 0.18, rx: seamRx });
+    if (isSuper) {
+      trimParts.push({ w: 0.06, h: 0.22, d: 0.5, x: sx * (W / 2 + 0.01), y: 0.55, z: -L * 0.18 });
+    }
+  }
+  if (isSuper && style.spoiler === 'wing') {
+    for (const sx of [-1, 1]) {
+      trimParts.push({ w: 0.08, h: 0.22, d: 0.3, x: sx * W * 0.3, y: 0.86, z: -L / 2 + 0.25 });
+    }
+  }
+  if (isSuper && style.nose === 'wedge') {
+    trimParts.push({ w: W * 0.98, h: 0.06, d: 0.3, x: 0, y: 0.28, z: L / 2 + 0.05 });
+  }
+  if (def.cls === 'suv') {
+    for (const sx of [-1, 1]) {
+      trimParts.push({ w: 0.08, h: 0.08, d: L * 0.4, x: sx * W * 0.3, y: 1.36, z: -L * 0.05 });
+    }
+  }
+  const trim = new THREE.Mesh(mergeBoxes(trimParts), trimMat);
+  group.add(trim);
   const headlights = new THREE.Mesh(mergeBoxes([
     { w: 0.34, h: 0.16, d: 0.06, x: -W * 0.32, y: 0.68, z: L / 2 + 0.02 },
     { w: 0.34, h: 0.16, d: 0.06, x: W * 0.32, y: 0.68, z: L / 2 + 0.02 },
@@ -133,16 +229,20 @@ export function createVehicles(game) {
   function spawn(defId, x, z, heading, opts = {}) {
     const def = VEHICLES[defId];
     if (!def) return null;
+    // A vehicle without a heading breaks physics (NaN forward) and
+    // breaks saves (the key drops out of JSON and voids the checksum),
+    // so a missing heading defaults to facing north, never undefined.
+    const face = heading ?? 0;
     const colorHex = opts.color ?? def.colors[Math.floor(Math.random() * def.colors.length)];
     const built = buildVehicleMesh(def, colorHex);
     built.group.position.set(x, 0, z);
-    built.group.rotation.y = heading;
+    built.group.rotation.y = face;
     game.scene.add(built.group);
     const vehicle = {
       id: nextVehicleId,
       plate: `VP-${1000 + ((nextVehicleId * 7919) % 9000)}`,
       def, defId,
-      x, z, y: 0, heading,
+      x, z, y: 0, heading: face,
       vx: 0, vz: 0, vy: 0, speed: 0, steer: 0, steerPull: 0, tireBurst: false,
       integrity: opts.integrity ?? def.durability,
       maxIntegrity: def.durability,
@@ -280,9 +380,26 @@ export function createVehicles(game) {
     return Math.round(vehicle.def.sell * (vehicle.integrity / vehicle.maxIntegrity));
   }
 
+  /** Swap a shot-out glass cabin to the shattered-glass material. Only
+   *  glass cabins change: van/truck cabins are painted metal. */
+  function setBrokenGlass(vehicle) {
+    if (vehicle.cabinMesh && vehicle.cabinMesh.material === glassMat) {
+      vehicle.cabinMesh.material = glassBrokenMat;
+    }
+  }
+
   function spawnParked(random) {
+    // Showcase supercars first: fixed, findable, stealable. Their
+    // coordinates reserve the ground, but they are NOT spawn spots:
+    // the random loop below must never stack a second car on top of
+    // one (a stacked car would spawn headingless and poison saves).
+    const taken = [];
+    for (const spot of SHOWCASE_SPOTS) {
+      spawn(spot.defId, spot.x, spot.z, spot.heading, { parked: true });
+      taken.push({ x: spot.x, z: spot.z });
+    }
     const spots = [];
-    for (let tries = 0; tries < 60 && spots.length < 16; tries += 1) {
+    for (let tries = 0; tries < 60 && taken.length + spots.length < 16; tries += 1) {
       const node = game.roadgraph.nodes[Math.floor(random() * game.roadgraph.nodes.length)];
       const rp = game.roadgraph.nearestRoadPoint(node.x + (random() - 0.5) * 60, node.z + (random() - 0.5) * 60);
       const side = random() < 0.5 ? 1 : -1;
@@ -291,6 +408,7 @@ export function createVehicles(game) {
       const x = rp.x + perpX * 5.2;
       const z = rp.z + perpZ * 5.2;
       if (game.physics.inWater(x, z)) continue;
+      if (taken.some((s) => dist2(s.x, s.z, x, z) < 14)) continue;
       if (spots.some((s) => dist2(s.x, s.z, x, z) < 14)) continue;
       spots.push({ x, z, heading: rp.heading + (side < 0 ? Math.PI : 0) });
     }
@@ -405,6 +523,7 @@ export function createVehicles(game) {
     nearest,
     resolveCollisions,
     sellValue,
+    setBrokenGlass,
     spawnParked,
     update,
     reset,

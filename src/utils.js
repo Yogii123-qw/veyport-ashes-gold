@@ -28,6 +28,16 @@ export function lerp(a, b, t) {
   return a + (b - a) * t;
 }
 
+export function smoothstep(edge0, edge1, x) {
+  const t = clamp((x - edge0) / (edge1 - edge0), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+export function easeInOutCubic(t) {
+  const x = clamp(t, 0, 1);
+  return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2;
+}
+
 /** Frame-rate independent approach: rate 1/s, dt seconds. */
 export function damp(current, target, rate, dt) {
   const t = 1 - Math.exp(-rate * dt);

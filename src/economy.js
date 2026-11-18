@@ -4,6 +4,7 @@
 // and upgrades all pass through here.
 
 import { ARMOR, ITEMS, WEAPONS, weaponById, weaponName } from '../data/weaponsData.js';
+import { VEHICLES } from '../data/vehiclesData.js';
 import { formatClock, formatMoney } from './utils.js';
 
 export const PRICES = {
@@ -164,6 +165,13 @@ export function createEconomy(game) {
   function retrieveVehicle(index, x, z, heading) {
     const entry = game.progress.garage[index];
     if (!entry) return null;
+    // A stale entry (edited save, removed vehicle type) must never
+    // crash the spawn: drop it and tell the player, instead of dying.
+    if (!VEHICLES[entry.defId]) {
+      game.progress.garage.splice(index, 1);
+      game.hud.notify(game.lang('garageStale'), 'bad');
+      return null;
+    }
     game.progress.garage.splice(index, 1);
     return game.vehicles.spawn(entry.defId, x, z, heading, { color: entry.color, integrity: entry.integrity });
   }

@@ -264,7 +264,7 @@ export function createCity(game) {
     matrix.setPosition(pl.x, pl.h / 2, pl.z);
     buildingMesh.setMatrixAt(idx, matrix);
     buildingMesh.setColorAt(idx, pl.color);
-    game.physics.addCollider(pl.x - pl.w / 2, pl.z - pl.d / 2, pl.x + pl.w / 2, pl.z + pl.d / 2, 'building');
+    game.physics.addCollider(pl.x - pl.w / 2, pl.z - pl.d / 2, pl.x + pl.w / 2, pl.z + pl.d / 2, 'building', pl.h);
   });
   buildingMesh.castShadow = true;
   buildingMesh.receiveShadow = true;
@@ -303,7 +303,7 @@ export function createCity(game) {
     matrix.makeScale(1, t.palm ? 0.6 : 1.15, 1);
     matrix.setPosition(t.x, t.palm ? 5.6 : 4.2, t.z);
     crownMesh.setMatrixAt(idx, matrix);
-    game.physics.addCollider(t.x - 0.4, t.z - 0.4, t.x + 0.4, t.z + 0.4, 'tree');
+    game.physics.addCollider(t.x - 0.4, t.z - 0.4, t.x + 0.4, t.z + 0.4, 'tree', t.palm ? 6.5 : 4.5);
   });
   trunkMesh.instanceMatrix.needsUpdate = true;
   crownMesh.instanceMatrix.needsUpdate = true;
@@ -344,7 +344,7 @@ export function createCity(game) {
     props.push({ x: cx - 6, y: 29, z: cz, w: 10, h: 2, d: 2, color: 0xc2702a });
     props.push({ x: cx + 16, y: 24, z: cz, w: 2, h: 8, d: 2, color: 0x333333 });
     props.push({ x: cx - 9, y: 26, z: cz, w: 4, h: 5, d: 4, color: 0x8a8a8a });
-    game.physics.addCollider(cx - 2.5, cz - 2.5, cx + 2.5, cz + 2.5, 'crane');
+    game.physics.addCollider(cx - 2.5, cz - 2.5, cx + 2.5, cz + 2.5, 'crane', 30);
   }
   // Shipping containers at the docks.
   const containerColors = [0xb8452f, 0x2f6b8a, 0xd9a441, 0x3f6b4f, 0x8a8a8a];
@@ -357,31 +357,31 @@ export function createCity(game) {
     const stacked = random() < 0.3;
     props.push({ x: cx, y: 1.3, z: cz, w: 6, h: 2.6, d: 2.5, ry: random() < 0.5 ? 0 : Math.PI / 2, color: containerColors[i % containerColors.length] });
     if (stacked) props.push({ x: cx, y: 3.9, z: cz, w: 6, h: 2.6, d: 2.5, ry: 0, color: containerColors[(i + 2) % containerColors.length] });
-    game.physics.addCollider(cx - 3.2, cz - 3.2, cx + 3.2, cz + 3.2, 'container');
+    game.physics.addCollider(cx - 3.2, cz - 3.2, cx + 3.2, cz + 3.2, 'container', stacked ? 5.2 : 2.6);
   }
   // Foundry chimneys.
   for (const [cx, cz] of [[-330, -330], [-270, -420], [-390, -480]]) {
     props.push({ x: cx, y: 20, z: cz, w: 5, h: 40, d: 5, color: 0x6a5a4a });
     props.push({ x: cx, y: 40.5, z: cz, w: 6, h: 1.5, d: 6, color: 0x4a3a2a });
-    game.physics.addCollider(cx - 3, cz - 3, cx + 3, cz + 3, 'chimney');
+    game.physics.addCollider(cx - 3, cz - 3, cx + 3, cz + 3, 'chimney', 40);
   }
   // Bridges over the channel.
   for (const b of BRIDGES) {
     props.push({ x: b.x, y: 0.35, z: (b.z0 + b.z1) / 2, w: 15, h: 0.7, d: b.z1 - b.z0 + 4, color: 0x4a4a4e });
     props.push({ x: b.x - 7.2, y: 1.1, z: (b.z0 + b.z1) / 2, w: 0.6, h: 1.4, d: b.z1 - b.z0 + 4, color: 0x8a2a2a });
     props.push({ x: b.x + 7.2, y: 1.1, z: (b.z0 + b.z1) / 2, w: 0.6, h: 1.4, d: b.z1 - b.z0 + 4, color: 0x8a2a2a });
-    game.physics.addCollider(b.x - 7.6, b.z0 - 2, b.x - 6.8, b.z1 + 2, 'rail');
-    game.physics.addCollider(b.x + 6.8, b.z0 - 2, b.x + 7.6, b.z1 + 2, 'rail');
+    game.physics.addCollider(b.x - 7.6, b.z0 - 2, b.x - 6.8, b.z1 + 2, 'rail', 1.8);
+    game.physics.addCollider(b.x + 6.8, b.z0 - 2, b.x + 7.6, b.z1 + 2, 'rail', 1.8);
   }
   // Tunnel hill over the east ring road.
   props.push({ x: 540, y: 8, z: -270, w: 42, h: 16, d: 122, color: 0x6a7a5a });
   props.push({ x: 540, y: 16.6, z: -270, w: 38, h: 1.5, d: 118, color: 0x5a6a4a });
   props.push({ x: 540, y: 6.4, z: -331, w: 20, h: 2.5, d: 2, color: 0x7a7a72 });
   props.push({ x: 540, y: 6.4, z: -209, w: 20, h: 2.5, d: 2, color: 0x7a7a72 });
-  game.physics.addCollider(520, -330, 531, -210, 'tunnel');
-  game.physics.addCollider(549, -330, 560, -210, 'tunnel');
-  game.physics.addCollider(531, -331, 549, -330, 'tunnel');
-  game.physics.addCollider(531, -210, 549, -209, 'tunnel');
+  game.physics.addCollider(520, -330, 531, -210, 'tunnel', 16);
+  game.physics.addCollider(549, -330, 560, -210, 'tunnel', 16);
+  game.physics.addCollider(531, -331, 549, -330, 'tunnel', 16);
+  game.physics.addCollider(531, -210, 549, -209, 'tunnel', 16);
   // Stunt ramps.
   for (const jump of STUNT_JUMPS) {
     props.push({ x: jump.x, y: 0.8, z: jump.z, w: 7, h: 1.6, d: 8, ry: jump.heading, rx: -0.32, color: 0xd9a441 });
@@ -397,7 +397,7 @@ export function createCity(game) {
     if (!clearPointClear(sx, sz)) continue;
     props.push({ x: sx, y: 1, z: sz, w: 4, h: 2, d: 3, color: 0x7a5a3a });
     props.push({ x: sx, y: 2.6, z: sz, w: 5, h: 0.3, d: 4, color: [0xb8452f, 0x2f6b8a, 0xd9a441][i % 3] });
-    game.physics.addCollider(sx - 2.2, sz - 1.8, sx + 2.2, sz + 1.8, 'stall');
+    game.physics.addCollider(sx - 2.2, sz - 1.8, sx + 2.2, sz + 1.8, 'stall', 2.8);
   }
   const propMesh = new THREE.Mesh(mergeBoxes(props), new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.05 }));
   propMesh.castShadow = true;
@@ -423,7 +423,7 @@ export function createCity(game) {
   lighthouse.add(lighthouseBeam);
   lighthouse.position.set(-500, 0, 540);
   group.add(lighthouse);
-  game.physics.addCollider(-505, 535, -495, 545, 'lighthouse');
+  game.physics.addCollider(-505, 535, -495, 545, 'lighthouse', 27);
 
   // ---------- Neon signs ----------
   const signs = [

@@ -13,6 +13,69 @@ const limbGeo = new THREE.BoxGeometry(0.16, 0.62, 0.16);
 const armGeo = new THREE.BoxGeometry(0.13, 0.56, 0.13);
 const legGeo = new THREE.BoxGeometry(0.17, 0.7, 0.17);
 
+// ---- In-hand weapons: one shared unit box, scaled per part, so a
+// held gun costs a few meshes and no extra geometry. Gun-local space:
+// the barrel runs along -y (away from the shoulder), the magazine
+// hangs toward -z and the sight sits toward +z — when the arm rises
+// to aim, -y points downrange, the magazine hangs down and the sight
+// rides on top, exactly as a held gun should.
+const unitBox = new THREE.BoxGeometry(1, 1, 1);
+const gunMetal = new THREE.MeshStandardMaterial({ color: 0x23262b, roughness: 0.4, metalness: 0.7 });
+const gunDark = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.6, metalness: 0.4 });
+const gunGrip = new THREE.MeshStandardMaterial({ color: 0x2e2118, roughness: 0.9 });
+const gunWood = new THREE.MeshStandardMaterial({ color: 0x6a4a2a, roughness: 0.8 });
+
+function gunPart(mat, w, h, d, x, y, z, rx = 0) {
+  const mesh = new THREE.Mesh(unitBox, mat);
+  mesh.scale.set(w, h, d);
+  mesh.position.set(x, y, z);
+  if (rx) mesh.rotation.x = rx;
+  return mesh;
+}
+
+export function buildWeaponMesh(weaponId) {
+  const group = new THREE.Group();
+  if (weaponId === 'p9') {
+    group.add(gunPart(gunMetal, 0.07, 0.3, 0.09, 0, -0.13, 0));
+    group.add(gunPart(gunGrip, 0.06, 0.13, 0.1, 0, 0.03, -0.05, 0.35));
+    group.add(gunPart(gunDark, 0.03, 0.06, 0.04, 0, -0.28, 0.01));
+  } else if (weaponId === 'kr9') {
+    group.add(gunPart(gunMetal, 0.08, 0.34, 0.1, 0, -0.12, 0));
+    group.add(gunPart(gunDark, 0.05, 0.18, 0.05, 0, -0.36, 0));
+    group.add(gunPart(gunDark, 0.06, 0.1, 0.16, 0, -0.08, -0.08));
+    group.add(gunPart(gunGrip, 0.05, 0.16, 0.08, 0, 0.1, 0.02));
+  } else if (weaponId === 'iron12') {
+    group.add(gunPart(gunMetal, 0.09, 0.5, 0.09, 0, -0.28, 0.01));
+    group.add(gunPart(gunWood, 0.1, 0.2, 0.08, 0, -0.25, -0.06));
+    group.add(gunPart(gunWood, 0.07, 0.26, 0.09, 0, 0.08, -0.02, 0.2));
+    group.add(gunPart(gunDark, 0.06, 0.08, 0.07, 0, -0.02, 0.03));
+  } else if (weaponId === 'vk7') {
+    group.add(gunPart(gunMetal, 0.08, 0.4, 0.11, 0, -0.14, 0));
+    group.add(gunPart(gunDark, 0.045, 0.3, 0.045, 0, -0.48, 0.01));
+    group.add(gunPart(gunDark, 0.06, 0.1, 0.18, 0, -0.1, -0.09, -0.2));
+    group.add(gunPart(gunGrip, 0.06, 0.2, 0.09, 0, 0.12, -0.01));
+    group.add(gunPart(gunDark, 0.03, 0.08, 0.05, 0, -0.12, 0.09));
+  } else {
+    return null;
+  }
+  return group;
+}
+
+/** Swap the weapon in a walker's right hand (fists = empty hand). */
+export function attachWeaponMesh(parts, weaponId) {
+  if (parts.weaponMesh) {
+    parts.armR.remove(parts.weaponMesh);
+    parts.weaponMesh = null;
+  }
+  if (!weaponId || weaponId === 'fists') return null;
+  const mesh = buildWeaponMesh(weaponId);
+  if (!mesh) return null;
+  mesh.position.set(0, -0.56, 0.08);
+  parts.armR.add(mesh);
+  parts.weaponMesh = mesh;
+  return mesh;
+}
+
 export function buildWalkerMesh(coatColor, skinColor, hairColor, pantsColor) {
   const group = new THREE.Group();
   const coatMat = new THREE.MeshStandardMaterial({ color: coatColor, roughness: 0.85 });

@@ -4,7 +4,7 @@
 // falls — or when the player shoots first. Reputation is the memory.
 
 import { clamp, dampAngle, dist2 } from './utils.js';
-import { animateWalker, buildWalkerMesh } from './pedestrians.js';
+import { animateWalker, attachWeaponMesh, buildWalkerMesh } from './pedestrians.js';
 
 export const FACTIONS = {
   harbormen: {
@@ -55,6 +55,8 @@ export function createGangs(game) {
       deadTimer: 0, fallAngle: 0, accuracy: opts.accuracy ?? 0.45,
       chaseTarget: null,
     };
+    // Armed members visibly carry their weapon, like the player.
+    attachWeaponMesh(parts, member.weapon);
     members.push(member);
     return member;
   }
@@ -229,12 +231,18 @@ export function createGangs(game) {
           }
         }
         if (m.burstLeft > 0) {
-          m.burstTimer -= dt;
-          if (m.burstTimer <= 0) {
-            m.burstTimer = m.weapon === 'vk7' ? 0.13 : 0.3;
-            m.burstLeft -= 1;
-            game.combat.npcShoot(m, game.player.x, game.player.y + 1.2, game.player.z, m.weapon, m.accuracy);
-            game.player.lastCombatAt = game.time;
+          if (!hasLOS && dPlayer > 15) {
+            // Lost sight mid-burst: hold fire instead of shooting
+            // through walls at a player who already broke away.
+            m.burstLeft = 0;
+          } else {
+            m.burstTimer -= dt;
+            if (m.burstTimer <= 0) {
+              m.burstTimer = m.weapon === 'vk7' ? 0.13 : 0.3;
+              m.burstLeft -= 1;
+              game.combat.npcShoot(m, game.player.x, game.player.y + 1.2, game.player.z, m.weapon, m.accuracy);
+              game.player.lastCombatAt = game.time;
+            }
           }
         }
         // Give up the chase far from home when the player escapes.

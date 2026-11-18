@@ -108,6 +108,7 @@ export function createCombat(game) {
     else if (walker.kind === 'officer') game.police.hurtOfficer(walker, total, byPlayer, headshot);
     if (byPlayer) {
       game.hud.showHitmarker(walker.hp <= 0);
+      game.audio.playSfx('hit', walker.x, walker.z);
       game.progress.stats.hits += 1;
     }
   }
@@ -157,13 +158,14 @@ export function createCombat(game) {
             game.vehicles.damage(vehicle, b.damage, b.x, b.z);
             if (wasGlass) {
               vehicle.brokenGlass = true;
-              vehicle.cabinMesh.material = vehicle.cabinMesh.material;
+              game.vehicles.setBrokenGlass(vehicle);
               game.particles.glass(b.x, b.y, b.z);
               game.audio.playSfx('glass', b.x, b.z);
             }
             game.particles.sparks(b.x, b.y, b.z, 5);
             if (b.shooter === 'player') {
               game.hud.showHitmarker(false);
+              game.audio.playSfx('hit', b.x, b.z);
               game.progress.stats.hits += 1;
             }
             consumed = true;
@@ -210,6 +212,9 @@ export function createCombat(game) {
       }
 
       if (consumed) {
+        // Ground impact kicks up dust where the round actually landed;
+        // a round that simply ran out of range fades without a mark.
+        if (ny <= 0.02) game.particles.groundHit(nx, 0.1, nz);
         spawnTracer(b.x, b.y, b.z, nx, ny, nz);
         b.active = false;
       } else {
@@ -244,9 +249,11 @@ export function createCombat(game) {
       if (meleeCooldown > 0) return;
       meleeCooldown = def.fireInterval;
       game.audio.playSfx('punch', game.player.x, game.player.z);
+      game.audio.playSfx('swing', game.player.x, game.player.z);
       game.progress.stats.shots += 1;
       const reach = def.range;
       const fwd = { x: Math.sin(game.player.heading), z: Math.cos(game.player.heading) };
+      game.particles.swing(game.player.x, game.player.y + 1.2, game.player.z, game.player.heading);
       const candidates = [];
       for (const w of game.pedestrians.walkers) if (w.state !== 'dead') candidates.push(w);
       for (const m of game.gangs.members) if (m.state !== 'dead') candidates.push(m);
@@ -257,6 +264,8 @@ export function createCombat(game) {
         const dot = ((w.x - game.player.x) * fwd.x + (w.z - game.player.z) * fwd.z) / Math.max(d, 0.01);
         if (dot < 0.4) continue;
         damageWalker(w, def.damage, false, true);
+        game.particles.dust(w.x, 1.1, w.z);
+        game.cameraRig.addTrauma(0.15);
         w.x += fwd.x * 0.8;
         w.z += fwd.z * 0.8;
       }
@@ -296,6 +305,15 @@ export function createCombat(game) {
       fireBullet(origin, dir, def, 'player');
     }
     game.particles.muzzle(origin.x, origin.y, origin.z);
+    // Flash at the muzzle tip, along the shot; casing ejects sideways.
+    const tip = {
+      x: origin.x + baseDir.x * 0.8,
+      y: origin.y + baseDir.y * 0.8,
+      z: origin.z + baseDir.z * 0.8,
+    };
+    game.particles.flash(tip.x, tip.y, tip.z, baseDir.x, baseDir.y, baseDir.z, def.flash);
+    const camFwd = game.cameraRig.forward();
+    game.particles.casing(origin.x, origin.y, origin.z, -camFwd.z, camFwd.x, def.casing);
     game.audio.playSfx(def.sound, game.player.x, game.player.z);
     game.events.emit('gunshot', { x: game.player.x, z: game.player.z, loud: true, shooter: 'player' });
     game.events.emit('crime', { kind: 'gunshot', x: game.player.x, z: game.player.z, heat: 15 });
@@ -332,6 +350,11 @@ export function createCombat(game) {
     dir.z /= dLen;
     fireBullet(origin, dir, def, 'npc');
     game.particles.muzzle(origin.x, origin.y, origin.z);
+    game.particles.flash(
+      origin.x + dir.x * 0.8, origin.y + dir.y * 0.8, origin.z + dir.z * 0.8,
+      dir.x, dir.y, dir.z, def.flash,
+    );
+    game.particles.casing(origin.x, origin.y, origin.z, -dir.z, dir.x, def.casing);
     game.audio.playSfx(def.sound, shooter.x, shooter.z);
     game.events.emit('gunshot', { x: shooter.x, z: shooter.z, loud: true, shooter: 'npc' });
   }

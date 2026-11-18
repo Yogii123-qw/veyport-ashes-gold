@@ -5,7 +5,7 @@
 
 export function createEventBus() {
   const listeners = new Map();
-  return {
+  const bus = {
     on(type, handler) {
       if (!listeners.has(type)) listeners.set(type, []);
       listeners.get(type).push(handler);
@@ -14,6 +14,20 @@ export function createEventBus() {
         const at = list.indexOf(handler);
         if (at >= 0) list.splice(at, 1);
       };
+    },
+    // One-shot listener: fires once, then removes itself. For events a
+    // system only ever needs to hear the first time (a first kill, a
+    // first storm), so callers cannot leak a permanent subscription.
+    once(type, handler) {
+      let off = null;
+      off = bus.on(type, (payload) => {
+        off();
+        handler(payload);
+      });
+      return off;
+    },
+    listenerCount(type) {
+      return listeners.get(type)?.length ?? 0;
     },
     emit(type, payload) {
       const list = listeners.get(type);
@@ -32,6 +46,7 @@ export function createEventBus() {
       listeners.clear();
     },
   };
+  return bus;
 }
 
 // Event payload shapes (documented once, used everywhere):

@@ -18,6 +18,11 @@ export function createWanted(game) {
   let lastKnown = null;
   let arrestTimer = 0;
   let starFlash = 0;
+  // WASTED cinematic: instead of an instant cut to the hospital, the
+  // camera cranes up over the body until the police helicopter is in
+  // frame, and only then does the respawn flow run.
+  let wastedSeq = null;
+  const WASTED_CRANE_SECONDS = 7;
 
   function starsForHeat(value) {
     let count = 0;
@@ -178,16 +183,40 @@ export function createWanted(game) {
     const paid = Math.min(bill, game.economy.money);
     game.economy.spend(paid, game.settings.language === 'id' ? 'Biaya rumah sakit' : 'Hospital bill');
     clearWanted();
-    game.hud.centerMessage(game.lang('wasted'), 2.4);
     game.hud.notify(game.lang('hospital'), 'bad');
     game.audio.playSfx('fail');
     game.events.emit('wasted', { bill: paid, source });
     if (game.missions.active) game.missions.failActive('wasted');
     if (game.contracts.active) game.contracts.failActive('wasted');
+    // The body stays where it fell; the crane shot runs first and the
+    // hospital respawn happens when it ends (see updateWasted).
+    wastedSeq = {
+      t: 0,
+      focus: { x: game.player.x, z: game.player.z },
+    };
+    game.police.ensureHeliOverhead();
+    game.cameraRig.beginWasted();
+  }
+
+  /**
+   * Advance the WASTED crane shot. Returns true while the shot is still
+   * running; when it ends, the hospital respawn flow runs and the
+   * player is alive again at St. Anselm.
+   */
+  function updateWasted(dt) {
+    if (!wastedSeq) return false;
+    wastedSeq.t += dt;
+    const t01 = clamp(wastedSeq.t / WASTED_CRANE_SECONDS, 0, 1);
+    game.cameraRig.updateWasted(dt, wastedSeq.focus, game.police.heliPos, t01);
+    if (wastedSeq.t < WASTED_CRANE_SECONDS) return true;
+    wastedSeq = null;
     game.player.hp = game.player.maxHp;
     game.player.dead = false;
     game.player.teleport(286, 30, -Math.PI / 2);
     game.cameraRig.snapBehind(game.player.heading);
+    game.hud.centerMessage(game.lang('wasted'), 2.4);
+    game.police.releaseHeli();
+    return false;
   }
 
   return {
@@ -197,14 +226,18 @@ export function createWanted(game) {
     get seen() { return seen; },
     get lastKnown() { return lastKnown; },
     get starFlash() { return starFlash; },
+    get wastedActive() { return !!wastedSeq; },
+    get wastedProgress() { return wastedSeq ? clamp(wastedSeq.t / WASTED_CRANE_SECONDS, 0, 1) : 0; },
     addHeat,
     clearWanted,
     update,
+    updateWasted,
     onPlayerArrest,
     onPlayerDeath,
     setState(nextHeat, nextStars) {
       heat = clamp(nextHeat, 0, 100);
       stars = clamp(nextStars, 0, 5);
+      wastedSeq = null;
     },
   };
 }
