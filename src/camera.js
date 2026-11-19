@@ -60,17 +60,35 @@ class ProxyTarget {
   // Chase an interpolated focus. XZ fast, Y slow, yaw shortest-arc.
   // Feed-forward: aim slightly ahead of the velocity so the proxy does
   // not lag behind a fast car.
+  // Yaw: on foot the camera yaw is its own state (look-drag only); the
+  // proxy never chases the player's facing here, or the stick whips the
+  // view (R4-D, ~700 deg/s). Drive chases the car's heading slowly
+  // (rate 6, was 20) so a turn never snaps the view; menu keeps 20.
   chase(f, dt, speed) {
     const kxz = damp(25, dt);
     const ky = damp(6, dt);
-    const kyaw = damp(20, dt);
     const lead = Math.min(0.12, speed * 0.004);
     const lx = f.x + Math.sin(f.heading) * lead * speed * 0.1;
     const lz = f.z + Math.cos(f.heading) * lead * speed * 0.1;
     this.x += (lx - this.x) * kxz;
     this.z += (lz - this.z) * kxz;
     this.y += (f.y - this.y) * ky;
-    this.yaw += shortArc(this.yaw, f.heading) * kyaw;
+    if (f.mode !== 'foot') {
+      const kyaw = damp(f.mode === 'drive' ? 6 : 20, dt);
+      let step = shortArc(this.yaw, f.heading) * kyaw;
+      if (f.mode === 'drive') {
+        // Hard cap on the chase rate: a sudden yaw of the car (a spin,
+        // an impact) must never whip the view. 1.75 rad/s is ~100 deg/s;
+        // an ordinary turn needs far less, so the cap only binds on a
+        // spike (R4-D: uncapped, full-lock steer from standstill peaked
+        // at 137 deg/s while the car itself peaked at 121 deg/s; a
+        // 1.9 rad/s cap still measured 111 deg/s, so the margin is set
+        // here, under the ~120 deg/s bar with room for sample jitter).
+        const cap = 1.75 * dt;
+        step = Math.max(-cap, Math.min(cap, step));
+      }
+      this.yaw += step;
+    }
     this.pitch += ((f.pitch || 0) - this.pitch) * damp(12, dt);
     this.vx = f.vx || 0;
     this.vz = f.vz || 0;

@@ -157,7 +157,16 @@ export function boot() {
 
   function focusOf() {
     if (player.onFoot) {
-      return { x: player.x, y: 1.4, z: player.z, heading: player.heading, speed: player.speed, mode: 'foot' };
+      // Foot camera is decoupled from the player's facing: its heading
+      // is the camera's own yaw (rig.yaw), changed only by look-drag
+      // and by snapTo at transitions. Chasing player.heading whipped
+      // the view whenever the stick turned the player (R4-D, measured
+      // ~700 deg/s on Monch's phone): the ghost stick input turned the
+      // player, the camera chased the turn, the turn changed the move
+      // direction. The proxy chase is also barred from yaw on foot
+      // (camera.js), or feeding rig.yaw back as the chase target would
+      // amplify each drag several times over.
+      return { x: player.x, y: 1.4, z: player.z, heading: rig.yaw, speed: player.speed, mode: 'foot' };
     }
     const v = player.vehicle;
     return { x: v.x, y: 1.2, z: v.z, heading: v.heading, speed: Math.abs(v.speed), mode: 'drive', vx: v.vx || 0, vz: v.vz || 0 };
@@ -349,6 +358,10 @@ export function boot() {
   el('btnStart').addEventListener('click', () => {
     audio.ensure();
     setMode('playing');
+    // Start behind the player: point the camera yaw at the spawn
+    // heading before the snap, or the menu yaw (0.6) would carry over
+    // and the opening view would sit 34 deg off the player (R4-D).
+    rig.yaw = player.heading;
     rig.snapTo(focusOf());
     // First play: mission 1 starts at the bar.
     if (!missions.isActive && missions.completed.length === 0 && !save.hasAutosave()) {

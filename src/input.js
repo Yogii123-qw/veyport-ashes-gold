@@ -4,6 +4,11 @@
 // phones synthesize from touches are blocked twice over (P6).
 
 export const JOY_DEAD = 0.12;
+export const JOY_RADIUS_PX = 59; // half the 118 px visible joyBase: the
+// stick's deflection radius. The old code divided by half the ZONE width
+// (82 px) on both axes although the zone is 164x354 px, so pressing the
+// visible knob already read joy.y = +0.66 (hard reverse) and pushing up
+// barely registered (R4-D, Monch's phone 01:27 WIB 20 Nov).
 export const LOOK_DEAD_PX = 6;
 export const LOOK_MIN_STEP_PX = 3;
 export const LOOK_SENS_TOUCH = 0.007; // rad per px: 60 px drag = ~0.42 rad
@@ -19,9 +24,21 @@ export class GameInput {
   constructor(canvas) {
     this.canvas = canvas;
     this.keys = new Set();
-    this.isTouch = false;
-    // Joystick (left thumb).
-    this.joy = { active: false, id: -1, x: 0, y: 0 };
+    // Touch hardware: show the stick + touch buttons from load (R4-D).
+    // The old code only added .touch after a touch landed on the canvas
+    // or the zone, so a first tap on MULAI left the stick hidden and the
+    // next thumb press fell through to the canvas as a look-drag.
+    this.isTouch = 'ontouchstart' in window
+      || (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+    if (this.isTouch) document.body.classList.add('touch');
+    window.addEventListener('touchstart', () => {
+      this.isTouch = true;
+      document.body.classList.add('touch');
+    }, { passive: true });
+    // Joystick (left thumb). Floating: its origin is the touchstart
+    // point inside the zone (ox/oy), radius JOY_RADIUS_PX, so pressing
+    // the visible knob reads exactly zero at rest (R4-D).
+    this.joy = { active: false, id: -1, x: 0, y: 0, ox: 0, oy: 0 };
     // Look drag (right thumb / mouse drag on empty screen).
     this.look = { active: false, id: -1, startX: 0, startY: 0, lastX: 0, lastY: 0, engaged: false, dx: 0, dy: 0 };
     this.mouseLook = { active: false, lastX: 0, lastY: 0 };
@@ -62,6 +79,28 @@ export class GameInput {
     return document.getElementById('joyKnob');
   }
 
+  _joyBaseEl() {
+    return document.getElementById('joyBase');
+  }
+
+  // Move the visible base so its centre sits on the floating origin;
+  // clear the inline style to send it back to its CSS home on release.
+  _placeBase(x, y) {
+    const base = this._joyBaseEl();
+    if (!base) return;
+    base.style.left = `${x - JOY_RADIUS_PX}px`;
+    base.style.top = `${y - JOY_RADIUS_PX}px`;
+    base.style.bottom = 'auto';
+  }
+
+  _resetBase() {
+    const base = this._joyBaseEl();
+    if (!base) return;
+    base.style.left = '';
+    base.style.top = '';
+    base.style.bottom = '';
+  }
+
   _bindTouch(canvas) {
     const zone = document.getElementById('joyZone');
     const onDown = (e) => {
@@ -72,7 +111,12 @@ export class GameInput {
         if (t.clientX >= r.left && t.clientX <= r.right && t.clientY >= r.top && t.clientY <= r.bottom && !this.joy.active) {
           this.joy.active = true;
           this.joy.id = t.identifier;
-          this._joyMove(t, r);
+          // Floating origin = where the thumb landed, clamped so the
+          // 118 px base stays on screen.
+          this.joy.ox = Math.max(JOY_RADIUS_PX, Math.min(window.innerWidth - JOY_RADIUS_PX, t.clientX));
+          this.joy.oy = Math.max(JOY_RADIUS_PX, Math.min(window.innerHeight - JOY_RADIUS_PX, t.clientY));
+          this._placeBase(this.joy.ox, this.joy.oy);
+          this._joyMove(t);
           e.preventDefault();
         }
       }
@@ -80,7 +124,7 @@ export class GameInput {
     const onMove = (e) => {
       for (const t of e.changedTouches) {
         if (this.joy.active && t.identifier === this.joy.id) {
-          this._joyMove(t, zone.getBoundingClientRect());
+          this._joyMove(t);
           e.preventDefault();
         }
       }
@@ -92,6 +136,7 @@ export class GameInput {
           this.joy.x = 0; this.joy.y = 0;
           const knob = this._joyEl();
           if (knob) knob.style.transform = 'translate(-50%, -50%)';
+          this._resetBase();
         }
       }
     };
@@ -148,12 +193,12 @@ export class GameInput {
     canvas.addEventListener('touchcancel', lookEnd);
   }
 
-  _joyMove(t, rect) {
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    const radius = rect.width / 2;
-    let dx = (t.clientX - cx) / radius;
-    let dy = (t.clientY - cy) / radius;
+  // Deflection from the floating origin (touchstart point), radius
+  // JOY_RADIUS_PX on both axes. Pressing the knob still reads (0, 0).
+  _joyMove(t) {
+    const radius = JOY_RADIUS_PX;
+    let dx = (t.clientX - this.joy.ox) / radius;
+    let dy = (t.clientY - this.joy.oy) / radius;
     const m = Math.hypot(dx, dy);
     if (m > 1) { dx /= m; dy /= m; }
     this.joy.x = dx;
