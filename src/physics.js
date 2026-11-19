@@ -1,153 +1,83 @@
-// physics.js — the arcade driving model (SPEC §3.3), shared.
-//
-// One driver for every wheeled thing: the player's car, traffic, and
-// police units all run the same power curve, soft limiter, steering and
-// drift. A power curve that launches hard and tapers near the top speed;
-// the data's topSpeed IS the cap (no throttle force at or above it, a
-// firm limiter pulls overshoot back), so cruise sits at ~100%. The
-// handbrake breaks rear grip into a real drift: lateral slip grows,
-// smoke and skid marks follow. Damage, smoke and fire thresholds live
-// here too (SPEC §3.3): smoke under 60% integrity, fire under 30%.
+// physics.js - the Veyport driving model, as pure functions plus one
+// wrapper. The step itself lives in vehicles.js (stepDrive); this module
+// owns the numbers around it: the power-curve simulation the F7 probe
+// measures, braking distances, drift state, and impact damage. Nothing
+// here duplicates stepDrive: applyDrive calls it once and adds the
+// phase-B behaviours (drift smoke flags, skid, damage smoke) on top.
+// Wheel spin stays where it belongs: only a detailed (player) car's four
+// separate wheel meshes ever rotate; traffic wheels are merged and static.
 
-export function createPhysics(deps) {
-  const { city, bus } = deps;
+import { accelAt, timeTo90, kmh } from './vehiclesData.js';
+import { stepDrive } from './vehicles.js';
 
-  /** Drive one vehicle for a step. `v` is the fleet's vehicle record;
-   *  `ctl` is {throttle -1..1, steer -1..1, handbrake bool}.
-   *  Returns the new speed in m/s. */
-  function drive(v, ctl, dt, gripFactor, others) {
-    const def = v.def;
-    const top = def.topSpeed;
-    const fwd = ctl.throttle;
-    const steerIn = ctl.steer;
-    const handbrake = ctl.handbrake ? 1 : 0;
+export { accelAt, timeTo90, kmh };
 
-    if (fwd > 0) {
-      if (v.speed < top) {
-        const taper = Math.max(0.18, 1 - 0.72 * (v.speed / top));
-        v.speed += def.accel * taper * fwd * dt;
-      }
-      if (v.speed > top) v.speed += (top - v.speed) * Math.min(1, 6.0 * dt);
-    } else if (fwd < 0) {
-      if (v.speed > 0.5) {
-        v.speed -= def.brake * dt;
-      } else {
-        v.speed += def.accel * 0.45 * fwd * dt;
-        if (v.speed < -12) v.speed = -12;
-      }
-    } else {
-      v.speed -= v.speed * Math.min(1, 0.9 * dt);
-      if (Math.abs(v.speed) < 0.05) v.speed = 0;
-    }
-
-    const speedFactor = Math.min(1, Math.abs(v.speed) / 7);
-    // P6: stronger high-speed steering cut (was 0.45). At 250 km/h a
-    // resting thumb used to weave the car 18 deg/s; the cut now keeps
-    // small inputs gentle at speed while full lock still turns.
-    // Acceleration / top speed are untouched (F7): this factor only
-    // scales the turn rate, and measureAccel drives with steer 0.
-    const highSpeedCut = 1 - 0.65 * Math.min(1, Math.abs(v.speed) / top);
-    const turn = steerIn * def.steer * speedFactor * highSpeedCut * (v.speed < 0 ? -1 : 1);
-    v.heading += turn * dt;
-    v.steerVis += (steerIn * 0.5 - v.steerVis) * Math.min(1, 8 * dt);
-
-    const grip = def.grip * gripFactor * (handbrake ? 0.35 : 1);
-    if (handbrake && Math.abs(v.speed) > 6) {
-      v.slip += steerIn * 1.4 * dt;
-      v.slip = Math.max(-0.6, Math.min(0.6, v.slip));
-      v.speed -= v.speed * Math.min(1, 0.35 * dt);
-      if (Math.abs(v.slip) > 0.22) bus.emit('drift-smoke', { x: v.x, z: v.z, heading: v.heading });
-    } else {
-      v.slip -= v.slip * Math.min(1, grip * dt);
-    }
-
-    const travel = v.heading + v.slip;
-    const nx = v.x + Math.sin(travel) * v.speed * dt;
-    const nz = v.z + Math.cos(travel) * v.speed * dt;
-    const res = city.resolveCircle(nx, nz, def.length * 0.42);
-    if (res.hit) {
-      const impact = Math.abs(v.speed);
-      if (impact > 4) bus.emit('wall-hit', { vehicle: v, speed: impact });
-      v.speed *= -0.25;
-      v.x = res.x;
-      v.z = res.z;
-      bus.emit('crash', { vehicle: v, speed: impact, x: v.x, z: v.z });
-    } else {
-      v.x = nx;
-      v.z = nz;
-    }
-
-    // Car-to-car bumps against the fleet passed in.
-    if (others) {
-      for (const o of others) {
-        if (o === v || o.wrecked) continue;
-        const dx = o.x - v.x;
-        const dz = o.z - v.z;
-        const d2 = dx * dx + dz * dz;
-        const minD = (def.length + o.def.length) * 0.42;
-        if (d2 < minD * minD && d2 > 0.001) {
-          const d = Math.sqrt(d2);
-          const push = (minD - d) / 2;
-          const ux = dx / d;
-          const uz = dz / d;
-          v.x -= ux * push;
-          v.z -= uz * push;
-          o.x += ux * push;
-          o.z += uz * push;
-          const rel = Math.abs(v.speed - o.speed);
-          if (rel > 3) bus.emit('car-hit', { a: v, b: o, speed: rel });
-          const tmp = v.speed;
-          v.speed = o.speed * 0.4;
-          o.speed = tmp * 0.4;
-        }
-      }
-    }
-
-    // Smoke / fire thresholds.
-    const frac = v.integrity / v.maxIntegrity;
-    v.smoke = frac < 0.6 ? (frac < 0.3 ? 2 : 1) : 0;
-
-    // Visuals: body lean + wheel spin.
-    v.wheelSpin += (v.speed / 0.36) * dt;
-    // Spin per-wheel meshes around their own axles. A merged single-mesh
-    // wheel set is NEVER rotated: rotating it around the mesh origin
-    // orbits the wheel centres instead of spinning the wheels (P9).
-    // Traffic/police wheels stay static — invisible at range.
-    if (Array.isArray(v.wheels)) {
-      for (const w of v.wheels) w.rotation.x = v.wheelSpin;
-    }
-    if (v.root) {
-      v.root.position.set(v.x, 0, v.z);
-      v.root.rotation.y = v.heading;
-      v.root.rotation.z = -turn * 0.05;
-      v.root.rotation.x = fwd > 0 ? -0.02 : 0;
-    }
-    return v.speed;
+// Simulate 0 to 90% of top speed at 60 Hz with the real curve and the
+// real drag terms stepDrive applies (rolling drag exp(-0.12 dt)).
+// Returns { t90, reached, topKmh }. Pure, node-testable.
+export function simulateLaunch(def) {
+  let v = 0;
+  const target = def.top * 0.9;
+  const dt = 1 / 60;
+  let t = 0;
+  while (v < target && t < 30) {
+    v += accelAt(def, v) * dt;
+    v *= Math.exp(-0.12 * dt);
+    t += dt;
   }
+  return { t90: +t.toFixed(2), reached: v >= target, topKmh: kmh(def.top) };
+}
 
-  /** Pure-model 0-to-top measurement (no collisions, no city). Used by
-   *  the F7 test: t90 = seconds to 90% of top speed, cruise = fraction
-   *  of top speed held after settling. */
-  function measureAccel(def) {
-    const v = {
-      def, speed: 0, heading: 0, x: 0, z: 0, slip: 0, steerVis: 0,
-      integrity: def.durability, maxIntegrity: def.durability,
-      root: null, wheels: null, wrecked: false, smoke: 0, wheelSpin: 0,
-    };
-    const fakeCity = { resolveCircle: (x, z) => ({ x, z, hit: null }) };
-    const fakeBus = { emit() {} };
-    const solo = createPhysics({ city: fakeCity, bus: fakeBus });
-    let t = 0;
-    let t90 = -1;
-    const dt = 1 / 60;
-    while (t < 30) {
-      solo.drive(v, { throttle: 1, steer: 0, handbrake: false }, dt, 1, null);
-      t += dt;
-      if (t90 < 0 && v.speed >= def.topSpeed * 0.9) t90 = t;
-      if (t > 12 && Math.abs(v.speed - def.topSpeed) < def.topSpeed * 0.03) break;
-    }
-    return { t90, cruise: v.speed / def.topSpeed, topKmh: Math.round(def.topSpeed * 3.6) };
-  }
+// Stopping distance (m) from a speed, using the class brake value and
+// the same rolling drag. Pure.
+export function brakingDistance(def, speedMs, gripMul = 1) {
+  const dec = def.brake * gripMul + 0.12 * Math.abs(speedMs);
+  if (dec <= 0) return Infinity;
+  return +(speedMs * speedMs / (2 * dec)).toFixed(1);
+}
 
-  return { drive, measureAccel };
+// Lateral slip estimate for a step: how much the car slides sideways
+// relative to its heading. Returns 0..1 (1 = full slide). Used for
+// tire smoke and skid audio.
+export function slipFactor(v, ctrl) {
+  if (!v || Math.abs(v.speed) < 4) return 0;
+  const steerMag = Math.abs(ctrl.steer || 0);
+  const hand = ctrl.handbrake ? 1 : 0;
+  const grip = v.def.grip || 1;
+  const raw = steerMag * Math.abs(v.speed) / v.def.top * (1.6 - grip * 0.7) + hand * 0.8;
+  return Math.max(0, Math.min(1, raw));
+}
+
+// Damage from a wall hit of a given impact speed (m/s). Matches the
+// stepDrive rule: nothing below 4 m/s, then (impact - 4) * 2.2.
+export function damageFromImpact(impact) {
+  if (impact <= 4) return 0;
+  return +(impact - 4) * 2.2;
+}
+
+// Drive one vehicle a step, then report the phase-B extras. Returns
+// { crash, drifting, skid, smoked } where crash is stepDrive's crash
+// event (or null). The wrapper never changes the physics: it only
+// observes it and sets the smoke flag the HUD/effects read.
+export function applyDrive(v, ctrl, dt, colliders, gripMul = 1) {
+  const crash = stepDrive(v, ctrl, dt, colliders, gripMul);
+  const slip = slipFactor(v, ctrl);
+  const drifting = slip > 0.55 && Math.abs(v.speed) > 6;
+  const skid = slip > 0.35;
+  const smoked = v.damage < 60 && !v.wrecked;
+  if (crash && crash.impact > 4) v.smoking = true;
+  return { crash, drifting, skid, smoked, slip };
+}
+
+// Turn radius (m) at a speed with full lock, from the steering model.
+export function turnRadius(def, speedMs) {
+  const rate = def.steer * Math.min(1, Math.abs(speedMs) / 7) * (1 - 0.65 * Math.min(1, Math.abs(speedMs) / def.top));
+  if (rate <= 0.001) return Infinity;
+  return +(Math.abs(speedMs) / rate).toFixed(1);
+}
+
+// How far a car coasts (m) from a speed with no input, rolling drag only.
+export function coastDistance(speedMs) {
+  if (speedMs <= 0) return 0;
+  return +(speedMs / 0.12).toFixed(1);
 }

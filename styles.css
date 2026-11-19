@@ -1,205 +1,210 @@
-/* VEYPORT: Ashes & Gold — HUD, menus, touch controls.
-   Dark amber + charcoal theme: readable in bright daylight and in the
-   rain at night. Touch targets are >= 48px; HUD never covers the
-   crosshair; portrait phones get a compact layout with the top bar
-   stacked (clock under the health row, not over it) and the touch
-   cluster clear of the speedometer. */
+/* Veyport styles. Touch targets are at least 48 px. The weapon label sits
+   top-left, clear of the buttons on the right (P2). One map button and one
+   pause button only (P1). */
 
-:root {
-  --amber: #e8a33c;
-  --amber-dim: #b87e28;
-  --ink: #f2ede2;
-  --ink-dim: #b8b2a4;
-  --panel: rgba(16, 18, 24, 0.88);
-  --panel-border: rgba(232, 163, 60, 0.45);
-  --danger: #d83a2a;
-  --good: #3fae5a;
+html, body {
+  margin: 0; padding: 0; height: 100%; overflow: hidden;
+  background: #0e1a24; color: #f2ede4;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-user-select: none; user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
-* { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1424; }
-body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--ink); }
-#game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-#status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.hidden { display: none !important; }
-
-button { font-family: inherit; cursor: pointer; }
+#game {
+  position: fixed; inset: 0; width: 100%; height: 100%;
+  display: block; touch-action: none;
+}
 
 /* ---------- HUD ---------- */
 #hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
-#hud button { pointer-events: auto; }
 
-#topLeft { position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); left: 14px; }
-.bar { width: 210px; height: 12px; background: rgba(0, 0, 0, 0.55); border: 1px solid rgba(255, 255, 255, 0.25); border-radius: 3px; overflow: hidden; margin-bottom: 4px; }
-.bar.armor { width: 210px; height: 7px; }
-#hpFill { height: 100%; width: 100%; background: linear-gradient(90deg, #d83a2a, #e8703a); transition: width 0.15s; }
-#armorFill { height: 100%; width: 0%; background: linear-gradient(90deg, #3a7ad8, #6ab8ff); transition: width 0.15s; }
-#cashRow { font-size: 20px; font-weight: 700; text-shadow: 0 1px 3px #000; }
-#cashLabel { font-size: 13px; color: var(--ink-dim); font-weight: 400; }
-#stars { font-size: 22px; letter-spacing: 3px; color: var(--amber); text-shadow: 0 0 8px rgba(232, 163, 60, 0.7); min-height: 26px; }
+#topBar {
+  position: absolute; top: 0; left: 0; right: 0;
+  display: flex; justify-content: space-between; align-items: flex-start;
+  padding: 10px 12px;
+}
 
-#topCenter { position: absolute; top: calc(10px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); text-align: center; }
-#compass { font-size: 13px; letter-spacing: 4px; color: var(--ink-dim); text-shadow: 0 1px 2px #000; }
-#clockRow { font-size: 15px; font-weight: 600; text-shadow: 0 1px 3px #000; }
-#clockRow span { margin: 0 6px; }
+#hudMoney { font-size: 22px; font-weight: 800; color: #7ee081; text-shadow: 0 1px 3px #000; }
+#hudWeapon { font-size: 13px; color: #f5c542; text-shadow: 0 1px 3px #000; margin-top: 2px; }
 
-#topRight { position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); right: 14px; display: flex; gap: 8px; }
-.hudBtn { background: var(--panel); color: var(--ink); border: 1px solid var(--panel-border); border-radius: 6px; padding: 8px 12px; font-size: 14px; font-weight: 600; }
+#topCenter { text-align: center; }
+#hudCompass {
+  display: inline-block; min-width: 34px; padding: 4px 8px;
+  background: rgba(0,0,0,.55); border: 1px solid #555; border-radius: 6px;
+  font-weight: 800; font-size: 15px;
+}
+#hudClock { font-size: 12px; margin-top: 4px; text-shadow: 0 1px 3px #000; }
 
-#objective { position: absolute; top: 100px; left: 14px; max-width: 340px; background: var(--panel); border-left: 3px solid var(--amber); padding: 8px 12px; border-radius: 4px; font-size: 14px; line-height: 1.4; }
-#objective .objMission { font-weight: 700; color: var(--amber); }
-#objective .objSub { font-size: 12px; color: var(--ink-dim); }
+#topRight { display: flex; gap: 8px; }
+.iconBtn {
+  pointer-events: auto; min-width: 52px; min-height: 48px;
+  background: rgba(0,0,0,.6); color: #fff; border: 1px solid #888;
+  border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer;
+}
 
-#weaponBox { position: absolute; right: 14px; bottom: 118px; text-align: right; text-shadow: 0 1px 3px #000; }
-#weaponName { font-size: 17px; font-weight: 700; }
-#ammo { font-size: 22px; font-weight: 700; color: var(--amber); }
-#weaponKeys { margin-top: 4px; }
-.wKey { width: 30px; height: 30px; margin-left: 4px; background: rgba(0, 0, 0, 0.5); color: var(--ink-dim); border: 1px solid rgba(255, 255, 255, 0.3); border-radius: 4px; font-size: 13px; }
-.wKey.active { color: #111; background: var(--amber); border-color: var(--amber); font-weight: 700; }
+#minimap {
+  position: absolute; top: 68px; right: 12px;
+  width: 150px; height: 150px;
+  border: 2px solid rgba(255,255,255,.35); border-radius: 8px;
+  background: #0e1a24;
+}
 
-#speedo { position: absolute; right: 14px; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); text-align: right; text-shadow: 0 1px 3px #000; }
-#speedKmh { font-size: 42px; font-weight: 800; line-height: 1; color: #fff; }
-#speedUnit { font-size: 12px; color: var(--ink-dim); }
-#speedBar { width: 170px; height: 6px; background: rgba(0, 0, 0, 0.55); border-radius: 3px; margin: 4px 0 4px auto; overflow: hidden; }
-#speedFill { height: 100%; width: 0%; background: var(--amber); }
-#carName { font-size: 13px; color: var(--ink-dim); }
-#carHealth { width: 170px; height: 5px; background: rgba(0, 0, 0, 0.55); border-radius: 3px; margin-left: auto; overflow: hidden; }
-#carHealthFill { height: 100%; width: 100%; background: var(--good); }
+#hudObjective {
+  position: absolute; left: 12px; bottom: 12px; max-width: 46vw;
+  font-size: 13px; color: #ffe9a8; text-shadow: 0 1px 3px #000;
+}
 
-#minimap { position: absolute; left: 14px; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); width: 200px; height: 200px; border: 2px solid rgba(255, 255, 255, 0.25); border-radius: 6px; background: #141a26; }
+#hpBar {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px;
+  width: 180px; height: 12px; background: rgba(0,0,0,.6);
+  border: 1px solid #888; border-radius: 6px; overflow: hidden;
+}
+#hudHp { height: 100%; width: 100%; background: #e0483e; }
 
-#crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 22px; height: 22px; }
-#crosshair::before, #crosshair::after { content: ""; position: absolute; background: rgba(255, 255, 255, 0.9); box-shadow: 0 0 3px #000; }
-#crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
-#crosshair::after { left: 0; top: 10px; width: 22px; height: 2px; }
-.ch-dot { position: absolute; left: 9px; top: 9px; width: 4px; height: 4px; border-radius: 50%; background: var(--amber); }
-#hitmarker { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) rotate(45deg); font-size: 26px; color: #fff; text-shadow: 0 0 6px var(--danger); }
+#hudSpeed {
+  position: absolute; right: 12px; bottom: 176px;
+  font-size: 20px; font-weight: 800; text-shadow: 0 1px 3px #000;
+}
 
-#interactPrompt { position: absolute; left: 50%; bottom: 22%; transform: translateX(-50%); background: var(--panel); border: 1px solid var(--panel-border); padding: 8px 16px; border-radius: 6px; font-size: 15px; }
-
-#notice { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); text-align: center; font-size: 17px; font-weight: 600; text-shadow: 0 1px 4px #000; }
-#notice div { margin-bottom: 4px; animation: noticeIn 0.25s ease-out; }
-@keyframes noticeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
-
-/* ---------- Story dialog ---------- */
-#dialogBox { position: fixed; left: 50%; bottom: calc(18px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); width: min(680px, calc(100% - 28px)); display: flex; gap: 12px; background: var(--panel); border: 1px solid var(--panel-border); border-radius: 10px; padding: 14px 16px; z-index: 8; cursor: pointer; }
-#dialogPortrait { width: 96px; height: 96px; flex: none; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.25); background: #22262f; }
-.dialogMain { flex: 1; min-width: 0; }
-#dialogName { font-weight: 800; color: var(--amber); letter-spacing: 1px; margin-bottom: 4px; }
-#dialogText { font-size: 15px; line-height: 1.55; min-height: 44px; }
-#dialogChoices { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
-#dialogChoices button { text-align: left; background: rgba(232, 163, 60, 0.14); color: var(--ink); border: 1px solid var(--panel-border); border-radius: 6px; padding: 10px 12px; font-size: 14px; font-weight: 600; }
-#dialogChoices button:hover { background: rgba(232, 163, 60, 0.35); }
-#dialogChoices button.defaultChoice { border-color: var(--amber); }
-.dialogSkip { margin-top: 10px; background: none; border: none; color: var(--ink-dim); font-size: 12px; padding: 4px 0; }
-
-/* ---------- Mission result / ending ---------- */
-.resultPanel { text-align: center; }
-#resultMission { font-size: 16px; margin-bottom: 8px; }
-#resultGrade { font-size: 34px; font-weight: 800; color: var(--amber); letter-spacing: 4px; margin: 8px 0; }
-#resultStats { font-size: 14px; line-height: 1.9; color: var(--ink-dim); }
-#endingTitle { font-size: 34px; letter-spacing: 6px; }
-#endingText { font-size: 15px; line-height: 1.6; margin: 10px 0 6px; }
-
-/* ---------- WASTED / BUSTED ---------- */
-.overlay.wasted, .overlay.busted { background: rgba(8, 10, 16, 0.55); flex-direction: column; }
-.bigWord { font-size: 84px; font-weight: 900; letter-spacing: 12px; color: var(--danger); text-shadow: 0 0 32px rgba(216, 58, 42, 0.8); animation: wordIn 0.5s ease-out; }
-.overlay.busted .bigWord { color: #3a7ad8; text-shadow: 0 0 32px rgba(58, 122, 216, 0.8); }
-.billLine { font-size: 18px; margin-top: 10px; text-shadow: 0 1px 4px #000; }
-/* P5: the continue button sits below the bill/fine line. */
-.overlay.wasted .bigBtn, .overlay.busted .bigBtn { margin-top: 26px; }
-@keyframes wordIn { from { opacity: 0; transform: scale(1.4); } to { opacity: 1; transform: scale(1); } }
+#weaponSlots {
+  position: absolute; left: 12px; top: 96px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.wslot {
+  pointer-events: auto; width: 52px; min-height: 48px;
+  background: rgba(0,0,0,.55); color: #ddd; border: 1px solid #666;
+  border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.wslot.active { background: #f5c542; color: #111; border-color: #f5c542; }
 
 /* ---------- Touch controls ---------- */
-#touchUI { position: fixed; inset: 0; pointer-events: none; z-index: 6; }
-#joy { position: absolute; left: 18px; bottom: calc(90px + env(safe-area-inset-bottom, 0px)); width: 128px; height: 128px; border-radius: 50%; background: rgba(255, 255, 255, 0.08); border: 2px solid rgba(255, 255, 255, 0.3); pointer-events: auto; }
-#joyKnob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; margin: -28px 0 0 -28px; border-radius: 50%; background: rgba(232, 163, 60, 0.55); border: 2px solid rgba(255, 255, 255, 0.5); }
-#touchRight { position: absolute; right: 14px; bottom: calc(230px + env(safe-area-inset-bottom, 0px)); display: grid; grid-template-columns: 1fr 1fr; gap: 10px; pointer-events: auto; }
-.tBtn { min-width: 64px; min-height: 56px; padding: 10px 12px; border-radius: 12px; border: 2px solid rgba(255, 255, 255, 0.35); background: rgba(16, 18, 24, 0.6); color: var(--ink); font-size: 13px; font-weight: 700; }
-.tBtn.held { background: var(--amber); color: #111; border-color: var(--amber); }
-.tBtn.fire { background: rgba(216, 58, 42, 0.55); border-color: rgba(255, 255, 255, 0.4); }
-.tBtn.fire.held { background: var(--danger); }
-.tBtn.run { background: rgba(63, 174, 90, 0.45); }
-.tBtn.run.held { background: var(--good); }
-.tBtn.small { min-width: 56px; min-height: 44px; font-size: 12px; }
-#touchTop { position: absolute; right: 14px; top: calc(64px + env(safe-area-inset-top, 0px)); display: flex; gap: 8px; pointer-events: auto; }
-/* P1: on touch devices the desktop map/pause buttons hide — the touch
-   set above is the only one. Gated on body.touch (same JS detection
-   that shows #touchUI), never on a media query, so the two sets can
-   never disagree about which one is showing. */
-body.touch #topRight { display: none; }
+#joyZone {
+  position: fixed; left: 0; bottom: 0; width: 42vw; height: 42vh;
+  z-index: 6; touch-action: none;
+}
+#joyBase {
+  position: absolute; left: 26px; bottom: 64px;
+  width: 118px; height: 118px; border-radius: 50%;
+  background: rgba(255,255,255,.08); border: 2px solid rgba(255,255,255,.35);
+}
+#joyKnob {
+  position: absolute; left: 50%; top: 50%; width: 52px; height: 52px;
+  border-radius: 50%; background: rgba(255,255,255,.35);
+  border: 2px solid rgba(255,255,255,.6);
+  transform: translate(-50%, -50%);
+}
 
-/* ---------- Overlays / menus ---------- */
-.overlay { position: fixed; inset: 0; background: rgba(8, 10, 16, 0.72); display: flex; align-items: center; justify-content: center; z-index: 10; }
-.menuInner { text-align: center; max-width: 560px; padding: 24px; }
-.menuInner h1 { font-size: 72px; letter-spacing: 14px; margin: 0; color: var(--amber); text-shadow: 0 4px 24px rgba(232, 163, 60, 0.45); }
-.subtitle { font-size: 22px; letter-spacing: 10px; color: var(--ink); margin-top: -8px; }
-.tagline { color: var(--ink-dim); font-size: 15px; margin: 18px 0 26px; }
-.menuBtns { display: flex; flex-direction: column; gap: 10px; align-items: center; }
-.bigBtn { min-width: 260px; padding: 13px 22px; font-size: 16px; font-weight: 700; color: var(--ink); background: rgba(232, 163, 60, 0.14); border: 1px solid var(--panel-border); border-radius: 8px; }
-.bigBtn:hover:not(:disabled) { background: rgba(232, 163, 60, 0.35); }
-.bigBtn:disabled { opacity: 0.4; cursor: default; }
-.controls { font-size: 13px; color: var(--ink-dim); margin-top: 22px; line-height: 1.7; }
-.saveNote { font-size: 13px; color: var(--amber); }
+#touchBtns { position: fixed; right: 12px; bottom: 64px; z-index: 6; }
+.tbtn {
+  display: block; width: 76px; min-height: 56px; margin-top: 10px;
+  background: rgba(0,0,0,.55); color: #fff; border: 2px solid rgba(255,255,255,.4);
+  border-radius: 12px; font-size: 14px; font-weight: 700; cursor: pointer;
+  touch-action: none;
+}
+.tbtn.big { background: rgba(245,197,66,.85); color: #111; border-color: #f5c542; }
+.tbtn:active { background: rgba(255,255,255,.35); }
 
-.panel { background: var(--panel); border: 1px solid var(--panel-border); border-radius: 12px; padding: 26px 30px; max-width: 520px; width: calc(100% - 40px); max-height: 84vh; overflow-y: auto; }
-.panel h2 { margin: 0 0 16px; color: var(--amber); letter-spacing: 2px; }
-.panelSub { color: var(--amber); font-size: 14px; letter-spacing: 1px; margin: 18px 0 8px; }
-.panel label { display: block; margin-bottom: 16px; font-size: 14px; }
-.panel input[type="range"], .panel select { width: 100%; margin-top: 6px; padding: 6px; background: #22262f; color: var(--ink); border: 1px solid #555; border-radius: 4px; }
-.panelBtns { margin-top: 18px; display: flex; gap: 10px; justify-content: center; }
-.panelBtns .bigBtn { min-width: 140px; }
-#ledger { font-size: 13px; line-height: 1.8; margin-top: 12px; border-top: 1px solid #444; padding-top: 10px; }
-#ledger .neg { color: #ff8a7a; }
-#ledger .pos { color: #7ad89a; }
-#forecast { font-size: 13px; color: var(--ink-dim); margin-top: 14px; line-height: 1.7; }
-#shopList { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
-.shopItem { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: rgba(255, 255, 255, 0.05); padding: 10px 12px; border-radius: 6px; font-size: 14px; }
-.shopItem button { background: var(--amber); color: #111; border: none; border-radius: 5px; padding: 8px 14px; font-weight: 700; }
-.shopItem button:disabled { opacity: 0.4; }
-#shopCash { font-size: 16px; font-weight: 700; }
-#fullmap { border: 2px solid var(--panel-border); border-radius: 8px; background: #141a26; max-width: 92vw; max-height: 78vh; }
-.mapHint { text-align: center; color: var(--ink-dim); font-size: 13px; }
+body:not(.touch) #joyZone,
+body:not(.touch) #touchBtns { display: none; }
 
-/* Contract board + save slots (pause menu). */
-#contractList, #saveSlots { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
-.contractRow, .saveRow { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: rgba(255, 255, 255, 0.05); padding: 10px 12px; border-radius: 6px; font-size: 13px; }
-.contractRow.active { border: 1px solid var(--amber); }
-.contractRow button, .saveRow button { background: var(--amber); color: #111; border: none; border-radius: 5px; padding: 7px 10px; font-weight: 700; font-size: 12px; }
-.contractRow button:disabled, .saveRow button:disabled { opacity: 0.4; }
-#contractRep { font-size: 13px; color: var(--ink-dim); }
-.importRow { font-size: 13px; color: var(--ink-dim); margin-top: 10px; }
-.importRow input { width: 100%; margin-top: 6px; }
+/* ---------- Overlays ---------- */
+.overlay {
+  position: fixed; inset: 0; z-index: 20;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(5, 10, 16, .72);
+}
+.panel {
+  width: min(92vw, 480px); padding: 28px 24px; text-align: center;
+  background: #141d26; border: 1px solid #3a4a58; border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.6);
+}
+.panel h1 { margin: 0; font-size: 44px; letter-spacing: 6px; color: #f5c542; }
+.panel h2 { margin: 0 0 12px; font-size: 30px; letter-spacing: 3px; }
+.panel h2.bad { color: #e0483e; }
+.panel .sub { margin: 2px 0 14px; font-size: 15px; letter-spacing: 4px; color: #9fb4c4; }
+.panel .desc { font-size: 15px; line-height: 1.5; color: #d5dde3; }
+.panel .help { font-size: 12px; line-height: 1.6; color: #8a9aa8; margin-top: 16px; }
 
-/* ---------- Portrait phones ---------- */
-/* The phase-1 portrait layout stacked the clock on top of the health
-   row and pushed the touch cluster into the speedometer. Here the top
-   bar stacks cleanly (clock below the bars, centred), the objective
-   sits under it, and the touch cluster floats above the speedometer. */
-@media (max-width: 700px), (orientation: portrait) and (max-width: 900px) {
-  .menuInner h1 { font-size: 44px; letter-spacing: 8px; }
-  .subtitle { font-size: 16px; letter-spacing: 6px; }
-  .bar { width: 150px; }
-  #cashRow { font-size: 17px; }
-  #topCenter { left: 14px; transform: none; text-align: left; position: absolute; top: 96px; }
-  #compass { font-size: 11px; }
-  #clockRow { font-size: 13px; }
-  #clockRow span { margin: 0 3px; }
-  #objective { top: 148px; max-width: 250px; font-size: 12px; }
-  #minimap { width: 118px; height: 118px; }
-  /* P2: the weapon box sat at bottom 348px on the right, overlapping the
-     bottom row of the touch grid (AKSI/PAKAI spans 380-568px from the
-     bottom) — the ammo line hid under PAKAI. Move it to the left edge,
-     above the joystick (which tops out at 272px from the bottom). */
-  #weaponBox { bottom: 300px; left: 10px; right: auto; text-align: left; }
-  #speedo { bottom: 218px; right: 10px; }
-  #speedKmh { font-size: 30px; }
-  #speedBar, #carHealth { width: 130px; }
-  #touchRight { bottom: 380px; right: 10px; }
-  #joy { bottom: 160px; left: 12px; width: 112px; height: 112px; }
-  #topRight { top: calc(8px + env(safe-area-inset-top, 0px)); right: 10px; }
-  #dialogBox { bottom: calc(8px + env(safe-area-inset-bottom, 0px)); padding: 10px 12px; }
-  #dialogPortrait { width: 64px; height: 64px; }
-  #dialogText { font-size: 13px; }
-  .bigWord { font-size: 52px; letter-spacing: 6px; }
+.bigBtn {
+  display: block; width: 100%; min-height: 52px; margin-top: 12px;
+  background: #f5c542; color: #111; border: none; border-radius: 10px;
+  font-size: 17px; font-weight: 800; letter-spacing: 1px; cursor: pointer;
+}
+.bigBtn.ghost { background: transparent; color: #ddd; border: 1px solid #666; }
+
+.mapPanel { width: min(94vw, 580px); }
+#bigMap { width: 100%; max-width: 520px; height: auto; border-radius: 8px; border: 1px solid #3a4a58; }
+
+@media (max-width: 700px) {
+  #minimap { width: 110px; height: 110px; }
+  #hudObjective { max-width: 38vw; font-size: 12px; }
+  #hudSpeed { bottom: 200px; }
+  .panel h1 { font-size: 34px; }
+}
+
+/* ---------- Phase B: dialog box, feed, banner, hitmarker, stars ---------- */
+#dialogBox {
+  position: fixed; left: 50%; bottom: 12%; transform: translateX(-50%);
+  width: min(92vw, 640px); z-index: 30;
+  background: rgba(10, 16, 22, .92); border: 1px solid #3a4a58;
+  border-radius: 12px; padding: 14px 18px; color: #e8eef2;
+  box-shadow: 0 10px 32px rgba(0,0,0,.55);
+}
+#dlgSpeaker { font-weight: 800; letter-spacing: 1px; margin-bottom: 6px; }
+#dlgText { font-size: 16px; line-height: 1.5; min-height: 48px; white-space: pre-wrap; }
+#dlgChoices { margin-top: 10px; display: flex; gap: 10px; flex-wrap: wrap; }
+.dlgChoice {
+  flex: 1; min-height: 44px; padding: 8px 12px; cursor: pointer;
+  background: #f5c542; color: #111; border: none; border-radius: 8px;
+  font-size: 15px; font-weight: 700;
+}
+#dlgHint { margin-top: 8px; font-size: 12px; color: #8a9aa8; }
+
+#notifyFeed {
+  position: fixed; top: 74px; left: 50%; transform: translateX(-50%);
+  z-index: 25; display: flex; flex-direction: column; gap: 6px;
+  align-items: center; pointer-events: none; width: min(92vw, 480px);
+}
+.notify {
+  background: rgba(10, 16, 22, .9); border: 1px solid #3a4a58;
+  color: #e8eef2; border-radius: 8px; padding: 8px 14px;
+  font-size: 14px; font-weight: 600; text-align: center;
+}
+.notify.good { border-color: #57c84d; color: #b8f0ae; }
+.notify.bad { border-color: #e0483e; color: #ffb3ae; }
+
+#missionBanner {
+  position: fixed; top: 22%; left: 50%; transform: translateX(-50%);
+  z-index: 26; text-align: center; pointer-events: none;
+  text-shadow: 0 2px 10px rgba(0,0,0,.8);
+}
+.bannerTitle { font-size: 34px; font-weight: 800; letter-spacing: 3px; color: #f5c542; }
+.bannerSub { font-size: 16px; color: #e8eef2; margin-top: 4px; }
+
+#hitmarker {
+  position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 26; font-size: 30px; font-weight: 800; pointer-events: none;
+  text-shadow: 0 0 6px rgba(0,0,0,.9);
+}
+
+#wantedStars { display: flex; gap: 2px; align-items: center; }
+#wantedStars .star { font-size: 16px; color: #f5c542; line-height: 1; }
+#wantedStars .star.lit { text-shadow: 0 0 6px rgba(245,197,66,.9); }
+
+.resRow {
+  display: flex; justify-content: space-between; gap: 12px;
+  padding: 7px 2px; border-bottom: 1px solid rgba(255,255,255,.08);
+  font-size: 15px; color: #d5dde3; text-align: left;
+}
+.resRow b { color: #fff; }
+
+.setRow {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 12px; padding: 8px 2px; font-size: 15px; color: #d5dde3;
+}
+.setRow label { text-align: left; }
+.setRow select, .setRow input[type="range"] { flex: 1; max-width: 220px; }
+.setRow select {
+  background: #1c2b33; color: #fff; border: 1px solid #3a4a58;
+  border-radius: 6px; padding: 6px 8px; font-size: 15px;
 }

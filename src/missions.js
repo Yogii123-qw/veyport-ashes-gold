@@ -1,437 +1,668 @@
-// missions.js — the six story missions of Veyport (SPEC §3.1).
-//
-// Each mission is data: a chain of stages, and each stage is one kind
-// of work — go somewhere, talk, steal a car, deliver on a timer, defeat
-// a group, defend a place, chase a moving target, break a truck, race
-// checkpoints, or choose. Stages are checked every frame against real
-// game state; nothing completes by a timer pretending to be progress.
-// Failures are real too (timer out, target dead, truck destroyed) and
-// restart from the last checkpoint stage. The M5 and M6 choices are
-// recorded in the save and change the ending.
+// missions.js - the six story missions and the two endings.
+// Data-driven stages: goto, talk, steal, deliver, combat, defend,
+// chase, choice, race. Each stage sets a waypoint (3D beacon + minimap
+// blip + HUD objective) and completes on a real condition: a distance
+// check, a dialog closing, a car entered, a target dead, a timer.
+// Fail conditions are real too (timer out, truck escaped, target car
+// wrecked). Checkpoints let a retry resume mid-mission. Nothing here
+// fakes progress: the probe completes missions by driving, entering
+// cars, and shooting, exactly like a player.
 
-import { pickText } from './langData.js';
-import { LANDMARKS } from './city.js';
+import { MISSION_TEXT } from './langData.js';
+import { buildPlayerCar, buildTrafficCar } from './vehicles.js';
+import { applyDrive } from './physics.js';
 
-const DIALOG = {
-  ilex1: [
-    { speaker: { id: 'Madame Ilex', en: 'Madame Ilex' }, portrait: 28, text: { id: 'Rook Calloway. Akhirnya pulang juga. Utang adikmu, Cole — $8.000 ke Harbormen. Mereka tidak lupa.', en: 'Rook Calloway. Home at last. Your brother Cole\'s debt — $8,000 to the Harbormen. They don\'t forget.' } },
-    { speaker: { id: 'Madame Ilex', en: 'Madame Ilex' }, portrait: 28, text: { id: 'Kerja pertama: curi mobil di luar sana, antar ke safehouse-mu. Jangan buat keributan.', en: 'First job: steal a car out there, bring it to your safehouse. Don\'t make a scene.' } },
-  ],
-  drayke2: [
-    { speaker: { id: 'Marlow Drayke', en: 'Marlow Drayke' }, portrait: 210, text: { id: 'Kargo panas di dok. Antar ke tiga titik sebelum dingin. Polisi sudah mengendus — jangan berhenti.', en: 'Hot cargo at the docks. Deliver to three points before it goes cold. The police are sniffing — don\'t stop.' } },
-  ],
-  ilex3: [
-    { speaker: { id: 'Madame Ilex', en: 'Madame Ilex' }, portrait: 28, text: { id: 'Foundry Kings membajak kargo kita. Masuk chop-shop mereka, ambil mobil bertanda itu. Penjaganya tidak ramah.', en: 'The Foundry Kings hijacked our cargo. Get into their chop-shop and take the marked car. Its guards are not friendly.' } },
-  ],
-  drayke4: [
-    { speaker: { id: 'Marlow Drayke', en: 'Marlow Drayke' }, portrait: 210, text: { id: 'Balapan malam ini, Neon Mile. Tiga checkpoint. Menang, dan KR-9 itu milikmu. Kalah, dan kamu milik mereka.', en: 'Tonight\'s race, Neon Mile. Three checkpoints. Win, and the KR-9 is yours. Lose, and you are theirs.' } },
-  ],
-  pell5: [
-    { speaker: { id: 'Sersan Ada Pell', en: 'Sergeant Ada Pell' }, portrait: 150, text: { id: 'Aku tahu siapa kamu, Rook. Cole pernah menyelamatkan nyawaku. Utang itu direkayasa — Vex yang menulisnya.', en: 'I know who you are, Rook. Cole once saved my life. That debt was forged — Vex wrote it.' } },
-  ],
-  vex6: [
-    { speaker: { id: 'Vex Kroll', en: 'Vex Kroll' }, portrait: 350, text: { id: 'Emas itu milikku, Rook. Adikmu hanya pion. Sekarang pilih: serahkan aku ke polisi, atau ambil emasnya dan pergi.', en: 'That gold is mine, Rook. Your brother was only a pawn. Now choose: hand me to the police, or take the gold and walk away.' } },
-  ],
-};
+const THREE = window.THREE;
 
-const MISSIONS = [
-  {
-    id: 'm1', title: { id: 'Homecoming Ash', en: 'Homecoming Ash' }, reward: 400,
-    stages: [
-      { id: 'walk-bar', kind: 'goto', x: 30, z: -180, r: 14, text: { id: 'Jalan kaki ke bar The Rusty Anchor', en: 'Walk to The Rusty Anchor bar' } },
-      { id: 'talk-ilex', kind: 'dialog', lines: DIALOG.ilex1, text: { id: 'Bicara dengan Madame Ilex', en: 'Talk to Madame Ilex' } },
-      { id: 'steal-car', kind: 'enterVehicle', text: { id: 'Curi mobil pertama', en: 'Steal your first car' } },
-      { id: 'to-safehouse', kind: 'driveTo', x: -460, z: -380, r: 12, text: { id: 'Antar mobil ke safehouse', en: 'Deliver the car to the safehouse' } },
-    ],
-  },
-  {
-    id: 'm2', title: { id: 'Hot Cargo', en: 'Hot Cargo' }, reward: 600,
-    stages: [
-      { id: 'pickup', kind: 'goto', x: -520, z: -480, r: 9, text: { id: 'Ambil kargo di dok', en: 'Pick up the cargo at the docks' } },
-      { id: 'talk-drayke', kind: 'dialog', lines: DIALOG.drayke2, text: { id: 'Dengar instruksi Drayke', en: 'Hear Drayke\'s instructions' } },
-      { id: 'drop1', kind: 'deliver', x: 150, z: -300, r: 9, time: 150, text: { id: 'Antar kargo: titik 1 dari 3', en: 'Deliver the cargo: point 1 of 3' } },
-      { id: 'drop2', kind: 'deliver', x: 420, z: 150, r: 9, time: 150, text: { id: 'Antar kargo: titik 2 dari 3', en: 'Deliver the cargo: point 2 of 3' } },
-      { id: 'drop3', kind: 'deliver', x: -150, z: 450, r: 9, time: 150, text: { id: 'Antar kargo: titik 3 dari 3', en: 'Deliver the cargo: point 3 of 3' } },
-      { id: 'escape', kind: 'driveTo', x: -460, z: -380, r: 12, text: { id: 'Kabur ke safehouse', en: 'Escape to the safehouse' } },
-    ],
-  },
-  {
-    id: 'm3', title: { id: 'The Foundry Cut', en: 'The Foundry Cut' }, reward: 900,
-    stages: [
-      { id: 'sneak', kind: 'goto', x: -400, z: 180, r: 16, text: { id: 'Susup ke chop-shop Foundry Kings', en: 'Sneak into the Foundry Kings chop-shop' } },
-      { id: 'guards', kind: 'defeat', gang: 'foundry', count: 3, x: -400, z: 200, text: { id: 'Lumpuhkan 3 penjaga chop-shop', en: 'Take down the 3 chop-shop guards' } },
-      { id: 'marked-car', kind: 'enterVehicleType', type: 'swift', x: -390, z: 200, text: { id: 'Curi mobil bertanda (Swift)', en: 'Steal the marked car (Swift)' } },
-      { id: 'run', kind: 'driveTo', x: -460, z: -380, r: 12, text: { id: 'Kabur dari roadblock ke safehouse', en: 'Escape the roadblock to the safehouse' } },
-    ],
-  },
-  {
-    id: 'm4', title: { id: 'Neon Mile Run', en: 'Neon Mile Run' }, reward: 1200,
-    stages: [
-      { id: 'talk-drayke', kind: 'dialog', lines: DIALOG.drayke4, text: { id: 'Dengar instruksi Drayke', en: 'Hear Drayke\'s instructions' } },
-      { id: 'race1', kind: 'race', x: -150, z: -150, r: 10, time: 150, text: { id: 'Balapan: checkpoint 1 dari 3', en: 'Race: checkpoint 1 of 3' } },
-      { id: 'race2', kind: 'race', x: 150, z: -150, r: 10, time: 150, text: { id: 'Balapan: checkpoint 2 dari 3', en: 'Race: checkpoint 2 of 3' } },
-      { id: 'race3', kind: 'race', x: 300, z: 150, r: 10, time: 150, text: { id: 'Balapan: checkpoint 3 dari 3', en: 'Race: checkpoint 3 of 3' } },
-      { id: 'ambush', kind: 'defeat', gang: 'foundry', count: 4, x: 300, z: 150, text: { id: 'Hadapi penyergapan geng', en: 'Fight off the gang ambush' } },
-      { id: 'to-palm', kind: 'driveTo', x: 420, z: -420, r: 12, text: { id: 'Kabur ke Palm Heights', en: 'Escape to Palm Heights' } },
-    ],
-  },
-  {
-    id: 'm5', title: { id: 'Harbor of Lies', en: 'Harbor of Lies' }, reward: 1500,
-    stages: [
-      { id: 'wave1', kind: 'defend', gang: 'foundry', count: 2, wave: 1, x: -460, z: -380, r: 30, text: { id: 'Pertahankan safehouse: gelombang 1 dari 3', en: 'Defend the safehouse: wave 1 of 3' } },
-      { id: 'wave2', kind: 'defend', gang: 'foundry', count: 3, wave: 2, x: -460, z: -380, r: 30, text: { id: 'Pertahankan safehouse: gelombang 2 dari 3', en: 'Defend the safehouse: wave 2 of 3' } },
-      { id: 'wave3', kind: 'defend', gang: 'foundry', count: 4, wave: 3, x: -460, z: -380, r: 30, text: { id: 'Pertahankan safehouse: gelombang 3 dari 3', en: 'Defend the safehouse: wave 3 of 3' } },
-      { id: 'chase', kind: 'chase', gang: 'foundry', x: -300, z: -300, r: 7, text: { id: 'Kejar pengkhianat itu', en: 'Chase down the traitor' } },
-      { id: 'choice', kind: 'choice', lines: DIALOG.pell5, choices: [
-        { label: { id: 'Tangkap dia — serahkan ke Pell', en: 'Capture him — hand him to Pell' }, value: 'capture', default: true },
-        { label: { id: 'Lepaskan dia — biarkan lari', en: 'Let him go' }, value: 'release' },
-      ], text: { id: 'Putuskan nasib pengkhianat', en: 'Decide the traitor\'s fate' } },
-    ],
-  },
-  {
-    id: 'm6', title: { id: 'Ashes & Gold', en: 'Ashes & Gold' }, reward: 2500,
-    stages: [
-      { id: 'intercept', kind: 'damageVehicle', type: 'armored', x: -100, z: -100, below: 0.4, text: { id: 'Cegat truk lapis baja Vex — hancurkan sampai berhenti', en: 'Intercept Vex\'s armored truck — wreck it until it stops' } },
-      { id: 'to-lighthouse', kind: 'driveTo', x: 480, z: 520, r: 16, text: { id: 'Kejar ke mercusuar Ember Sands', en: 'Chase it to the Ember Sands lighthouse' } },
-      { id: 'showdown', kind: 'defeat', gang: 'foundry', count: 5, x: 480, z: 520, boss: true, text: { id: 'Hadapi Vex dan pengawalnya', en: 'Face Vex and his guards' } },
-      { id: 'final', kind: 'choice', lines: DIALOG.vex6, choices: [
-        { label: { id: 'Serahkan Vex ke Pell (Abu)', en: 'Hand Vex to Pell (Ashes)' }, value: 'ashes', default: true },
-        { label: { id: 'Ambil emasnya dan pergi (Emas)', en: 'Take the gold and walk away (Gold)' }, value: 'gold' },
-      ], text: { id: 'Pilihan akhir: Abu atau Emas', en: 'Final choice: Ashes or Gold' } },
-    ],
-  },
-];
+const REWARDS = { m1: 400, m2: 600, m3: 900, m4: 1200, m5: 1500, m6: 2500 };
+const ORDER = ['m1', 'm2', 'm3', 'm4', 'm5', 'm6'];
+const CHECKPOINTS = { m1: [0], m2: [1], m3: [2], m4: [2], m5: [3], m6: [2] };
 
-export function createMissions(deps) {
-  const { player, vehicles, city, economy, bus, dialogs, wanted, weather, pedestrians } = deps;
-  const lang = () => (deps.getLang ? deps.getLang() : 'id');
-  const notify = (msg) => { if (deps.notify) deps.notify(msg); };
-
-  const state = {
-    activeIndex: -1, // index into MISSIONS, -1 = none
-    stageIdx: 0,
-    stageState: {},
-    completed: [],
-    choices: {},
-    storyComplete: false,
-    ending: null,
-    nextDelay: 0,
-    failed: 0,
-    elapsed: 0, // seconds spent on the active mission (result screen)
+// Stage tables: plain data, read by the runner below.
+function stageDefs(lang) {
+  const T = MISSION_TEXT[lang.code] || MISSION_TEXT.id;
+  return {
+    m1: [
+      { kind: 'goto', x: 300, z: -150, r: 12, text: T.m1.stages[0] },
+      { kind: 'talk', x: 300, z: -150, r: 12, lines: T.m1.intro, text: T.m1.stages[1] },
+      { kind: 'steal', x: 330, z: -180, r: 4, classId: 'swift', text: T.m1.stages[2] },
+      { kind: 'goto', x: -450, z: -375, r: 15, needCar: true, text: T.m1.stages[3] },
+    ],
+    m2: [
+      // Pickup in the open lane between the docks container rows
+      // (rows at z=-450 and z=-420): the point (-500,-450) sits inside
+      // the container wall and no car can reach it.
+      { kind: 'goto', x: -500, z: -435, r: 10, text: T.m2.stages[0] },
+      { kind: 'deliver', x: 300, z: -450, r: 12, timer: 240, text: T.m2.stages[1] },
+      { kind: 'deliver', x: 0, z: 450, r: 12, text: T.m2.stages[2] },
+      { kind: 'deliver', x: 450, z: 300, r: 12, text: T.m2.stages[3] },
+    ],
+    m3: [
+      { kind: 'goto', x: -375, z: 75, r: 12, onFoot: true, text: T.m3.stages[0] },
+      { kind: 'combat', x: -375, z: 75, count: 3, text: T.m3.stages[1] },
+      { kind: 'steal', x: -375, z: 75, r: 4, classId: 'bulldog', marked: true, text: T.m3.stages[2] },
+      { kind: 'goto', x: -450, z: -375, r: 15, needCar: true, text: T.m3.stages[3] },
+    ],
+    m4: [
+      { kind: 'race', x: -450, z: -450, r: 14, timer: 200, text: T.m4.stages[0] },
+      { kind: 'race', x: 450, z: -450, r: 14, text: T.m4.stages[1] },
+      { kind: 'race', x: 450, z: 450, r: 14, text: T.m4.stages[2] },
+      { kind: 'combat', x: 450, z: 450, count: 2, of: 4, text: T.m4.stages[3] },
+    ],
+    m5: [
+      { kind: 'defend', wave: 1, count: 2, text: T.m5.stages[0] },
+      { kind: 'defend', wave: 2, count: 3, text: T.m5.stages[1] },
+      { kind: 'defend', wave: 3, count: 4, text: T.m5.stages[2] },
+      { kind: 'chase', text: T.m5.stages[3] },
+      { kind: 'choice', text: T.m5.stages[4] },
+    ],
+    m6: [
+      { kind: 'intercept', text: T.m6.stages[0] },
+      { kind: 'stopTruck', text: T.m6.stages[1] },
+      { kind: 'combat', x: 450, z: 525, count: 4, text: T.m6.stages[2] },
+      { kind: 'choice', text: T.m6.stages[3] },
+    ],
   };
+}
 
-  let spawned = []; // entities this stage owns (peds, vehicles)
+export class MissionSys {
+  constructor(w) {
+    this.w = w;
+    this.completed = [];
+    this.active = null;
+    this.stage = 0;
+    this.flags = {};
+    this.ending = null;
+    this.failed = 0;
+    this.spawned = [];
+    this.waveTargets = [];
+    this.truck = null;
+    this.truckRoute = [];
+    this.traitor = null;
+    this.traitorRoute = [];
+    this.stageTimer = 0;
+    // A mission-level timer: armed once by the first timed stage and
+    // kept across the following legs (M2's 240 s covers all 3 drops,
+    // M4's 200 s covers all 3 race checkpoints). Combat/choice/chase
+    // stages end the timed legs and disarm it.
+    this.missionTimer = 0;
+    this.timerArmed = false;
+    this.stageStartedAt = 0;
+    this.missionStartedAt = 0;
+    this.startStats = null;
+    this.dialogOpened = false;
+    this.stealCar = null;
+    this.checkpointStage = 0;
+    // Waypoint beacon: a glowing cylinder + ring at the target.
+    this.beacon = new THREE.Group();
+    const cyl = new THREE.Mesh(
+      new THREE.CylinderGeometry(1.6, 1.6, 26, 12, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xf5c542, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }),
+    );
+    cyl.position.y = 13;
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(1.8, 2.4, 24),
+      new THREE.MeshBasicMaterial({ color: 0xf5c542, transparent: true, opacity: 0.8, side: THREE.DoubleSide, depthWrite: false }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.3;
+    this.beacon.add(cyl, ring);
+    this.beacon.visible = false;
+    w.scene.add(this.beacon);
+    this.waypoint = null;
+    this.routePoints = [];
+    this.pulse = 0;
+  }
 
-  function cleanupSpawned() {
-    for (const s of spawned) {
-      if (s.kind === 'ped' && s.obj.alive) {
-        // Despawn quietly: remove the mesh, drop the ped.
-        s.obj.alive = false;
-        s.obj.mesh.visible = false;
-      }
-      if (s.kind === 'vehicle' && !s.obj.wrecked) {
-        vehicles.removeVehicle(s.obj);
-      }
+  get defs() {
+    return stageDefs(this.w.lang);
+  }
+
+  get currentDef() {
+    if (!this.active) return null;
+    return this.defs[this.active][this.stage] || null;
+  }
+
+  get title() {
+    if (!this.active) return '';
+    return this.w.lang.t(this.active + 'Title');
+  }
+
+  get isActive() {
+    return this.active !== null;
+  }
+
+  get nextMission() {
+    for (const id of ORDER) {
+      if (!this.completed.includes(id)) return id;
     }
-    spawned = [];
+    return null;
   }
 
-  function currentMission() {
-    return state.activeIndex >= 0 ? MISSIONS[state.activeIndex] : null;
-  }
-  function currentStage() {
-    const m = currentMission();
-    return m ? m.stages[state.stageIdx] : null;
+  saveState() {
+    return {
+      completed: this.completed.slice(),
+      active: this.active,
+      stage: this.stage,
+      flags: { ...this.flags },
+      ending: this.ending,
+      failed: this.failed,
+    };
   }
 
-  function startMission(i) {
-    if (i < 0 || i >= MISSIONS.length) return false;
-    state.activeIndex = i;
-    state.stageIdx = 0;
-    state.stageState = {};
-    state.elapsed = 0;
-    cleanupSpawned();
-    const m = MISSIONS[i];
-    bus.emit('mission-start', { mission: m.id, title: m.title });
-    if (i === 3) {
-      // M4 is a night race: the clock jumps to 21:00, honestly.
-      weather.setTime(21);
-      notify('Misi 4 dimulai malam hari — jam melompat ke 21:00.');
+  loadState(s) {
+    this.completed = s.completed || [];
+    this.active = s.active || null;
+    this.stage = s.stage || 0;
+    this.flags = s.flags || {};
+    this.ending = s.ending || null;
+    this.failed = s.failed || 0;
+    if (this.active) {
+      this.checkpointStage = this.stage;
+      // A choice stage cannot resume from a load (its dialog needs a
+      // live game): step back to the previous stage and replay it.
+      const def = this.currentDef;
+      if (def && def.kind === 'choice') {
+        this.stage = Math.max(0, this.stage - 1);
+        this.checkpointStage = this.stage;
+      }
+      this._setupStage();
     }
-    enterStage();
+  }
+
+  start(id) {
+    if (!ORDER.includes(id)) return false;
+    this.clearSpawned();
+    this.active = id;
+    this.stage = 0;
+    this.checkpointStage = 0;
+    this.missionStartedAt = this.w.stats ? this.w.stats.playSeconds : 0;
+    this.startStats = this.w.stats ? { ...this.w.stats } : null;
+    if (id === 'm4') {
+      // Night race: the clock jumps to 21:00, honestly announced.
+      this.w.weather.clock = 675;
+      if (this.w.ui) this.w.ui.notify(this.w.lang.t('nightRace'), 'info');
+      if (this.w.audio) this.w.audio.setMusicMode('mission');
+    }
+    if (this.w.ui) this.w.ui.banner(this.w.lang.t(id + 'Title'), '');
+    this._setupStage();
     return true;
   }
 
-  function enterStage() {
-    const st = currentStage();
-    if (!st) return;
-    state.stageState = { timeLeft: st.time || 0, kills: 0, target: null, dialogShown: false, raceNext: null };
-    const S = state.stageState;
-    if (st.kind === 'defeat' || st.kind === 'defend') {
-      const list = pedestrians.spawnGang(st.gang, st.x, st.z, st.count, { hostile: true });
-      for (const p of list) spawned.push({ kind: 'ped', obj: p });
-      S.need = st.count;
-      S.alive = list;
+  retry() {
+    if (!this.active) return false;
+    const id = this.active;
+    this.clearSpawned();
+    this.stage = this.checkpointStage;
+    this.missionStartedAt = this.w.stats ? this.w.stats.playSeconds : 0;
+    this.startStats = this.w.stats ? { ...this.w.stats } : null;
+    this._setupStage();
+    return true;
+  }
+
+  // A spawn point is clear when it sits outside every building
+  // collider (with a margin). Guards spawned inside a wall can never
+  // be shot (the ray hits the wall first) and can never walk out, so
+  // a mission stage would soft-lock.
+  _clearSpot(x, z, margin = 2) {
+    for (const c of this.w.colliders) {
+      if (x > c.x0 - margin && x < c.x1 + margin && z > c.z0 - margin && z < c.z1 + margin) return false;
     }
-    if (st.kind === 'chase') {
-      const list = pedestrians.spawnGang(st.gang, st.x, st.z, 1, { hostile: false });
-      S.target = list[0];
-      spawned.push({ kind: 'ped', obj: S.target });
-      // The traitor runs a route away from the player.
-      S.target.route = city.route(S.target.x, S.target.z, 300, 300);
-      S.target.routeIdx = 0;
-      S.target.state = 'walk';
+    return true;
+  }
+
+  // Rejection-sample a guard position near (cx, cz): up to 8 tries,
+  // keep the first clear spot, else fall back to the original point.
+  _guardSpot(cx, cz, spread) {
+    for (let i = 0; i < 8; i++) {
+      const gx = cx + (Math.random() - 0.5) * spread;
+      const gz = cz + (Math.random() - 0.5) * spread;
+      if (this._clearSpot(gx, gz)) return { x: gx, z: gz };
     }
-    if (st.kind === 'damageVehicle') {
-      // Spawn on the road, not on the stage point: the M6 point
-      // (-100,-100) sits inside a 30 m block in Neon Mile, so the truck
-      // was born trapped in the building — speed ~0, route stuck, and
-      // every shot died on the wall between muzzle and truck. The
-      // waypoint follows the live truck (waypoint() below), so the
-      // player still finds it; the truck then drives its route.
-      const spot = city.nearestRoadPoint(st.x, st.z) || { x: st.x, z: st.z };
-      const v = vehicles.makeVehicle(st.type, spot.x, spot.z, 0.8, { traffic: false });
-      v.cruise = v.def.topSpeed * 0.5;
-      v.route = city.route(v.x, v.z, 480, 520);
-      v.routeIdx = 0;
-      // Aim down the route from the start: a fixed spawn heading
-      // forces a ~120-degree turn in the first metres, and the turning
-      // arc carries the truck into the block on the inside of the
-      // corner, where it wedges forever (no turn authority at speed
-      // ~0, no reverse in traffic). Remember the mission destination
-      // so a wedge anywhere on the route re-routes back to it instead
-      // of to a random point (traffic.js).
-      if (v.route && v.route.length > 0) {
-        v.heading = Math.atan2(v.route[0].x - v.x, v.route[0].z - v.z);
+    return { x: cx, z: cz };
+  }
+
+  _setupStage() {
+    const def = this.currentDef;
+    if (!def) return;
+    if (def.timer && !this.timerArmed) {
+      this.missionTimer = def.timer;
+      this.timerArmed = true;
+    }
+    if (def.kind === 'combat' || def.kind === 'choice' || def.kind === 'chase') {
+      this.missionTimer = 0;
+      this.timerArmed = false;
+    }
+    this.stageTimer = this.missionTimer;
+    this.stageStartedAt = this.w.stats ? this.w.stats.playSeconds : 0;
+    this.dialogOpened = false;
+    this.waveTargets = [];
+    this.stealCar = null;
+    const cps = CHECKPOINTS[this.active] || [0];
+    for (const cp of cps) {
+      if (this.stage >= cp) this.checkpointStage = cp;
+    }
+    // Stage-specific setup.
+    if (def.kind === 'steal' && def.marked) {
+      const car = buildPlayerCar(this.w.scene, def.classId, def.x + 6, def.z + 4, 0);
+      car.marked = true;
+      this.w.cars.push(car);
+      this.spawned.push({ type: 'car', obj: car });
+      this.stealCar = car;
+    } else if (def.kind === 'steal') {
+      // The target is an existing parked car near the point.
+      let best = null, bestD = 60;
+      for (const c of this.w.cars) {
+        if (c.wrecked) continue;
+        const d = Math.hypot(c.x - def.x, c.z - def.z);
+        if (d < bestD) { bestD = d; best = c; }
       }
-      v.missionDest = { x: 480, z: 520 };
-      v.traffic = true; // drive it along the route like traffic
-      spawned.push({ kind: 'vehicle', obj: v });
-      S.target = v;
+      this.stealCar = best;
     }
-    if (st.kind === 'enterVehicleType') {
-      const v = vehicles.makeVehicle(st.type, st.x, st.z, 0.4, { parked: true });
-      // The marked car is mission-critical: the police converging on
-      // the player ram it (55 integrity = two hits) and the stage can
-      // never complete. It is invulnerable until the player gets in.
-      v.missionProtected = true;
-      spawned.push({ kind: 'vehicle', obj: v });
-      S.target = v;
-    }
-    if (st.kind === 'race') {
-      S.raceNext = { x: st.x, z: st.z, r: st.r };
-    }
-    if (st.kind === 'dialog' || st.kind === 'choice') {
-      if (!S.dialogShown) {
-        S.dialogShown = true;
-        dialogs.show({
-          lines: st.lines,
-          choices: st.choices || null,
-          onChoice: (value) => {
-            state.choices[st.id] = value;
-            advanceStage();
-          },
-          onDone: () => {
-            if (st.kind === 'dialog') advanceStage();
-          },
-        });
+    if (def.kind === 'combat') {
+      const n = def.of || def.count;
+      for (let i = 0; i < n; i++) {
+        const s = this._guardSpot(def.x, def.z, 24);
+        const guard = this.w.peds.spawnHostile(s.x, s.z, 100, 'guard');
+        this.waveTargets.push(guard);
+        this.spawned.push({ type: 'ped', obj: guard });
       }
     }
-    // Each drop stage has its own 150 s timer (M2): generous, but the
-    // clock is real and failing it restarts the mission.
-    if (st.id === 'pickup') {
-      // First wanted star of the story: the pickup is watched.
-      wanted.setStars(Math.max(wanted.stars, 1));
-    }
-    if (st.id === 'run') {
-      wanted.setStars(3);
-    }
-  }
-
-  function advanceStage() {
-    const m = currentMission();
-    if (!m) return;
-    state.stageIdx += 1;
-    if (state.stageIdx >= m.stages.length) {
-      completeMission();
-    } else {
-      enterStage();
-    }
-  }
-
-  function completeMission() {
-    const m = currentMission();
-    economy.earn(m.reward, `Misi selesai: ${m.title.en}`);
-    state.completed.push(m.id);
-    bus.emit('mission-complete', { mission: m.id, reward: m.reward, time: Math.round(state.elapsed) });
-    if (m.id === 'm3') economy.grantFreeRespray();
-    if (m.id === 'm4') {
-      player.giveWeapon('kr9', 60);
-      notify('KR-9 Ripper didapat!');
-    }
-    if (m.id === 'm5') player.state.armor = 100;
-    if (m.id === 'm6') {
-      state.storyComplete = true;
-      state.ending = state.choices.final || 'ashes';
-      bus.emit('story-complete', { ending: state.ending });
-    }
-    cleanupSpawned();
-    state.activeIndex = -1;
-    state.stageIdx = 0;
-    state.nextDelay = 3;
-  }
-
-  function failMission(reason) {
-    const m = currentMission();
-    if (!m) return;
-    state.failed += 1;
-    bus.emit('mission-failed', { mission: m.id, reason });
-    cleanupSpawned();
-    // Restart from the last checkpoint stage (a stage marked `checkpoint`,
-    // else the mission start). None are marked yet, so missions restart
-    // from stage 0 — honest, and stated in the fail notice.
-    state.stageIdx = 0;
-    state.stageState = {};
-    enterStage();
-  }
-
-  // Kills of mission targets advance defeat/defend stages.
-  bus.on('ped-down', ({ ped }) => {
-    const st = currentStage();
-    if (!st || (st.kind !== 'defeat' && st.kind !== 'defend')) return;
-    if (spawned.some((s) => s.kind === 'ped' && s.obj === ped)) {
-      state.stageState.kills = (state.stageState.kills || 0) + 1;
-      if (state.stageState.kills >= st.count) advanceStage();
-    }
-  });
-
-  function update(dt, ctx) {
-    // Auto-start the next mission a few seconds after the last one.
-    if (state.activeIndex < 0 && !state.storyComplete) {
-      const next = state.completed.length;
-      if (next < MISSIONS.length) {
-        state.nextDelay -= dt;
-        if (state.nextDelay <= 0) startMission(next);
+    if (def.kind === 'defend') {
+      const sh = this.w.city.landmarks.safehouse;
+      for (let i = 0; i < def.count; i++) {
+        // Random angle and radius, rejection-sampled against colliders.
+        let gx = sh.x, gz = sh.z;
+        for (let t = 0; t < 8; t++) {
+          const a = (i / def.count) * Math.PI * 2 + Math.random();
+          const r = 42 + Math.random() * 14;
+          gx = sh.x + Math.cos(a) * r;
+          gz = sh.z + Math.sin(a) * r;
+          if (this._clearSpot(gx, gz)) break;
+        }
+        const guard = this.w.peds.spawnHostile(gx, gz, 100, 'raider');
+        this.waveTargets.push(guard);
+        this.spawned.push({ type: 'ped', obj: guard });
       }
+      if (this.w.ui) this.w.ui.notify(this.w.lang.t('waveIncoming'), 'warn');
+    }
+    if (def.kind === 'chase') {
+      const sh = this.w.city.landmarks.safehouse;
+      const t = this.w.peds.spawnHostile(sh.x + 30, sh.z + 10, 100, 'traitor');
+      t.state = 'run';
+      this.traitor = t;
+      this.spawned.push({ type: 'ped', obj: t });
+      // Route: safehouse -> docks, along the road graph.
+      const from = this.w.graph.nearestNode(t.x, t.z);
+      const to = this.w.graph.nearestNode(-500, -450);
+      this.traitorRoute = this.w.graph.pathPoints(this.w.graph.shortestPath(from, to));
+      this.traitorIdx = 0;
+    }
+    if (def.kind === 'intercept') {
+      const truck = buildPlayerCar(this.w.scene, 'longnose', -450, 75, Math.PI);
+      truck.truckHp = 600;
+      truck.armored = true;
+      // The truck is a real combat target (same shape as a police car):
+      // without this registration no shot can ever hit it, and the
+      // stopTruck stage could never complete.
+      truck.radius = 2.2;
+      truck.alive = true;
+      this.w.combat.register(truck);
+      this.w.cars.push(truck);
+      this.spawned.push({ type: 'car', obj: truck });
+      this.truck = truck;
+      const from = this.w.graph.nearestNode(truck.x, truck.z);
+      const to = this.w.graph.nearestNode(450, 525);
+      this.truckRoute = this.w.graph.pathPoints(this.w.graph.shortestPath(from, to));
+      this.truckIdx = 0;
+    }
+    if (def.kind === 'choice' && this.active === 'm6') {
+      // The final choice opens as a dialog at the lighthouse.
+      this._openFinalChoice();
       return;
     }
-    const m = currentMission();
-    const st = currentStage();
-    if (!m || !st) return;
-    state.elapsed += dt; // mission clock: the result screen shows real time
-    const S = state.stageState;
-    const ps = player.state;
-    const p = player.position();
-
-    // Shared delivery timer (M2): runs across drop1..drop3.
-    if (st.kind === 'deliver') {
-      S.timeLeft -= dt;
-      if (S.timeLeft <= 0) { failMission('time'); return; }
+    if (def.kind === 'choice' && this.active === 'm5') {
+      this._openTraitorChoice();
+      return;
     }
-    if (st.kind === 'race') {
-      S.timeLeft -= dt;
-      if (S.timeLeft <= 0) { failMission('time'); return; }
-    }
+    this._setWaypoint(def);
+  }
 
-    const distTo = (x, z) => Math.hypot(p.x - x, p.z - z);
-    switch (st.kind) {
+  _setWaypoint(def) {
+    if (def.x !== undefined) {
+      this.waypoint = { x: def.x, z: def.z };
+      this.beacon.position.set(def.x, 0, def.z);
+      this.beacon.visible = true;
+      const from = this.w.graph.nearestNode(this.w.player.x, this.w.player.z);
+      const to = this.w.graph.nearestNode(def.x, def.z);
+      this.routePoints = this.w.graph.pathPoints(this.w.graph.shortestPath(from, to));
+    } else if (def.kind === 'chase' && this.traitor) {
+      this.waypoint = { x: this.traitor.x, z: this.traitor.z };
+      this.beacon.position.set(this.traitor.x, 0, this.traitor.z);
+      this.beacon.visible = true;
+      this.routePoints = [];
+    } else if ((def.kind === 'intercept' || def.kind === 'stopTruck') && this.truck) {
+      this.waypoint = { x: this.truck.x, z: this.truck.z };
+      this.beacon.position.set(this.truck.x, 0, this.truck.z);
+      this.beacon.visible = true;
+      this.routePoints = [];
+    } else {
+      this.waypoint = null;
+      this.beacon.visible = false;
+      this.routePoints = [];
+    }
+  }
+
+  _openTraitorChoice() {
+    const w = this.w;
+    const lines = [[
+      'System', w.lang.t('traitorChoice'),
+      { choices: [
+        { id: 'catch', label: w.lang.t('choiceCatch') },
+        { id: 'release', label: w.lang.t('choiceRelease') },
+      ] },
+    ]];
+    w.dialogs.open(lines, (choice) => {
+      this.flags.traitorSpared = choice === 'release';
+      if (choice === 'release' && this.traitor) {
+        this.traitor.state = 'walk';
+        this.traitor.hostile = false;
+      }
+      this._advance();
+    });
+  }
+
+  _openFinalChoice() {
+    const w = this.w;
+    const lines = [[
+      'System', w.lang.t('choiceTitle'),
+      { choices: [
+        { id: 'ash', label: w.lang.t('choiceAsh') },
+        { id: 'gold', label: w.lang.t('choiceGold') },
+      ] },
+    ]];
+    w.dialogs.open(lines, (choice) => {
+      this.ending = choice === 'gold' ? 'GOLD' : 'ASHES';
+      this._complete();
+    });
+  }
+
+  objectiveText() {
+    if (!this.active) return this.w.lang.t('freeRoam');
+    const def = this.currentDef;
+    return def ? def.text : '';
+  }
+
+  distanceToTarget() {
+    const p = this.w.player;
+    const px = p.onFoot ? p.x : (p.vehicle ? p.vehicle.x : p.x);
+    const pz = p.onFoot ? p.z : (p.vehicle ? p.vehicle.z : p.z);
+    let tx, tz;
+    if (this.waypoint) {
+      tx = this.waypoint.x; tz = this.waypoint.z;
+    } else if (this.truck) {
+      tx = this.truck.x; tz = this.truck.z;
+    } else if (this.traitor) {
+      tx = this.traitor.x; tz = this.traitor.z;
+    } else {
+      return null;
+    }
+    return Math.round(Math.hypot(tx - px, tz - pz));
+  }
+
+  clearSpawned() {
+    for (const s of this.spawned) {
+      if (s.type === 'ped') {
+        this.w.peds.remove(s.obj);
+      } else if (s.type === 'car') {
+        this.w.combat.unregister(s.obj);
+        this.w.scene.remove(s.obj.group);
+        const ci = this.w.cars.indexOf(s.obj);
+        if (ci >= 0) this.w.cars.splice(ci, 1);
+      }
+    }
+    this.spawned = [];
+    this.waveTargets = [];
+    this.truck = null;
+    this.traitor = null;
+  }
+
+  _advance() {
+    this.stage += 1;
+    const defs = this.defs[this.active];
+    if (this.stage >= defs.length) {
+      this._complete();
+      return;
+    }
+    this._setupStage();
+  }
+
+  _fail(reason) {
+    this.failed += 1;
+    if (this.w.stats) this.w.stats.missionsFailed += 1;
+    this.missionTimer = 0;
+    this.timerArmed = false;
+    this.clearSpawned();
+    this.beacon.visible = false;
+    this.waypoint = null;
+    if (this.w.ui) this.w.ui.showResults({
+      title: this.w.lang.t('missionFailed'),
+      mission: this.title,
+      reason,
+      reward: 0,
+      rank: '-',
+      failed: true,
+      onRetry: () => this.retry(),
+    });
+    if (this.w.save) this.w.save.autosave(this.w);
+  }
+
+  _complete() {
+    const id = this.active;
+    const reward = REWARDS[id] || 0;
+    const paid = this.w.economy.payout(reward, 1, `Misi ${this.title}`);
+    this.completed.push(id);
+    if (id === 'm4') {
+      this.w.player.giveWeapon('kr9', 30, 60);
+      this.w.player.switchWeapon('kr9');
+    }
+    if (id === 'm5') {
+      this.w.player.armor = 100;
+    }
+    if (id === 'm3') {
+      this.flags.freeRespray = true;
+    }
+    // Results: time, accuracy, rank.
+    const elapsed = this.w.stats ? this.w.stats.playSeconds - this.missionStartedAt : 0;
+    const shots = this.startStats ? (this.w.stats.shots - this.startStats.shots) : 0;
+    const hits = this.startStats ? (this.w.stats.hits - this.startStats.hits) : 0;
+    const acc = shots > 0 ? Math.round((hits / shots) * 100) : 100;
+    const par = { m1: 240, m2: 300, m3: 360, m4: 300, m5: 420, m6: 480 }[id] || 300;
+    const rank = elapsed <= par ? 'Emas' : elapsed <= par * 1.5 ? 'Perak' : 'Perunggu';
+    this.active = null;
+    this.stage = 0;
+    this.missionTimer = 0;
+    this.timerArmed = false;
+    this.beacon.visible = false;
+    this.waypoint = null;
+    this.routePoints = [];
+    if (this.w.audio) this.w.audio.setMusicMode('explore');
+    if (this.w.save) this.w.save.autosave(this.w);
+    if (id === 'm6') {
+      if (this.w.ui) this.w.ui.showEnding(this.ending, paid);
+      return;
+    }
+    const next = this.nextMission;
+    if (this.w.ui) this.w.ui.showResults({
+      title: this.w.lang.t('missionDone'),
+      mission: this.title,
+      reward: paid,
+      rank,
+      time: Math.round(elapsed),
+      accuracy: acc,
+      next: next ? this.w.lang.t(next + 'Title') : null,
+      onNext: next ? () => this.start(next) : null,
+    });
+  }
+
+  update(dt) {
+    this.pulse += dt;
+    if (this.beacon.visible) {
+      const s = 1 + Math.sin(this.pulse * 4) * 0.15;
+      this.beacon.scale.set(s, 1, s);
+    }
+    if (!this.active) return;
+    if (this.w.dialogs.isOpen) return;
+    const def = this.currentDef;
+    if (!def) return;
+    const p = this.w.player;
+    const px = p.onFoot ? p.x : (p.vehicle ? p.vehicle.x : p.x);
+    const pz = p.onFoot ? p.z : (p.vehicle ? p.vehicle.z : p.z);
+    // Stage timer (M2 delivery, M4 race): one mission-level clock.
+    if (this.missionTimer > 0) {
+      this.missionTimer -= dt;
+      this.stageTimer = Math.max(0, this.missionTimer);
+      if (this.missionTimer <= 0) {
+        this._fail('Waktu habis');
+        return;
+      }
+    }
+    // The truck drives itself toward the lighthouse.
+    if (this.truck && !this.truck.wrecked) {
+      this._driveTruck(dt);
+      if (this.truckRoute.length > 0 && this.truckIdx >= this.truckRoute.length) {
+        this._fail('Truk Vex mencapai mercusuar');
+        return;
+      }
+    }
+    // The traitor runs along his route.
+    if (this.traitor && this.traitor.alive && this.traitor.state === 'run') {
+      this._moveTraitor(dt);
+    }
+    switch (def.kind) {
       case 'goto':
-        if (distTo(st.x, st.z) < st.r) advanceStage();
-        break;
-      case 'driveTo':
-        if (ps.inVehicle && distTo(st.x, st.z) < st.r) advanceStage();
-        else if (!ps.inVehicle && distTo(st.x, st.z) < st.r * 0.5) advanceStage();
-        break;
       case 'deliver':
-        if (distTo(st.x, st.z) < st.r) advanceStage();
+      case 'race': {
+        if (def.needCar && p.onFoot) break;
+        if (def.onFoot && !p.onFoot) break;
+        const d = Math.hypot(def.x - px, def.z - pz);
+        if (d < def.r) {
+          if (def.kind === 'deliver' && this.stage === 1 && this.active === 'm2') {
+            // First drop: the police notice the hot cargo.
+            this.w.wanted.addHeat(15, 'cargo');
+          }
+          this._advance();
+        }
         break;
-      case 'race':
-        if (distTo(st.x, st.z) < st.r) advanceStage();
+      }
+      case 'talk': {
+        const d = Math.hypot(def.x - px, def.z - pz);
+        if (d < def.r && !this.dialogOpened) {
+          this.dialogOpened = true;
+          this.w.dialogs.open(def.lines, () => this._advance());
+        }
         break;
-      case 'enterVehicle':
-        if (ps.inVehicle) advanceStage();
+      }
+      case 'steal': {
+        if (this.stealCar && p.vehicle === this.stealCar) {
+          if (this.w.stats) this.w.stats.carsStolen += 1;
+          if (this.active === 'm1' || this.active === 'm3') {
+            this.w.wanted.addHeat(8, 'carjack');
+            this.w.peds.onCrime(px, pz, 6, 'carjack');
+          }
+          this._advance();
+        } else if (this.stealCar && this.stealCar.wrecked) {
+          this._fail('Mobil target hancur');
+        }
         break;
-      case 'enterVehicleType': {
-        const v = S.target;
-        if (v && ps.inVehicle && ps.vehicle === v) {
-          v.missionProtected = false; // the player's car now, normal rules
-          advanceStage();
+      }
+      case 'combat': {
+        const dead = this.waveTargets.filter((t) => !t.alive).length;
+        if (dead >= def.count) this._advance();
+        break;
+      }
+      case 'defend': {
+        const dead = this.waveTargets.filter((t) => !t.alive).length;
+        if (dead >= this.waveTargets.length && this.waveTargets.length > 0) {
+          if (this.w.ui) this.w.ui.notify(this.w.lang.t('safehouseDefended'), 'good');
+          this._advance();
         }
         break;
       }
       case 'chase': {
-        const t = S.target;
-        if (t && t.alive && distTo(t.x, t.z) < st.r) advanceStage();
-        else if (t && !t.alive) failMission('target-dead');
+        if (!this.traitor || !this.traitor.alive) {
+          this._fail('Pengkhianat lolos');
+          return;
+        }
+        const d = Math.hypot(this.traitor.x - px, this.traitor.z - pz);
+        this._setWaypoint(def);
+        if (d < 4) this._advance();
         break;
       }
-      case 'damageVehicle': {
-        const v = S.target;
-        if (!v) { failMission('target-gone'); break; }
-        if (v.wrecked) { failMission('truck-destroyed'); break; }
-        if (v.integrity / v.maxIntegrity < st.below) {
-          v.traffic = false;
-          v.speed = 0;
-          advanceStage();
+      case 'intercept': {
+        if (!this.truck) return;
+        const d = Math.hypot(this.truck.x - px, this.truck.z - pz);
+        if (d < 30) this._advance();
+        break;
+      }
+      case 'stopTruck': {
+        if (!this.truck) return;
+        if (this.truck.wrecked || this.truck.truckHp <= 0) {
+          if (this.w.ui) this.w.ui.notify(this.w.lang.t('truckStopped'), 'good');
+          this._advance();
         }
         break;
       }
-      case 'defeat':
-      case 'defend':
-        // Completion is driven by the ped-down handler above.
-        break;
-      case 'dialog':
       case 'choice':
-        // Completion is driven by the dialog callbacks.
+        // Completes through the dialog callback.
         break;
       default:
         break;
     }
-    void ctx;
   }
 
-  function waypoint() {
-    const st = currentStage();
-    if (!st) return null;
-    // Moving targets first: the marker follows the live target, not
-    // the stage's spawn point. The truck spawns on the nearest road
-    // (tens of metres from the stage point) and then drives away; a
-    // static marker would send the player to an empty building.
-    if ((st.kind === 'chase' || st.kind === 'damageVehicle') && state.stageState.target) {
-      return { x: state.stageState.target.x, z: state.stageState.target.z };
+  _driveTruck(dt) {
+    const w = this.w;
+    const t = this.truck;
+    const node = this.truckRoute[this.truckIdx];
+    if (!node) return;
+    const dx = node.x - t.x, dz = node.z - t.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 8) {
+      this.truckIdx += 1;
+      return;
     }
-    if (st.x !== undefined && st.z !== undefined) return { x: st.x, z: st.z };
-    return null;
+    const wantHeading = Math.atan2(dx, dz);
+    let dh = wantHeading - t.heading;
+    while (dh > Math.PI) dh -= 2 * Math.PI;
+    while (dh < -Math.PI) dh += 2 * Math.PI;
+    const steer = Math.max(-1, Math.min(1, dh * 1.5));
+    // The armored truck rolls at a steady 60% throttle.
+    applyDrive(t, { throttle: 0.6, brake: 0, steer, handbrake: false }, dt, w.colliders, w.weather.gripFactor());
+    if (this.waypoint) {
+      this.waypoint = { x: t.x, z: t.z };
+      this.beacon.position.set(t.x, 0, t.z);
+    }
   }
 
-  function objectiveText() {
-    const m = currentMission();
-    const st = currentStage();
-    if (!m || !st) return null;
-    let text = pickText(st.text, lang());
-    if (st.kind === 'deliver' || st.kind === 'race') {
-      text += ` — ${Math.max(0, Math.ceil(state.stageState.timeLeft))}s`;
+  _moveTraitor(dt) {
+    const t = this.traitor;
+    const node = this.traitorRoute[this.traitorIdx];
+    if (!node) {
+      t.state = 'walk';
+      return;
     }
-    if (st.kind === 'defeat' || st.kind === 'defend') {
-      const left = st.count - (state.stageState.kills || 0);
-      text += ` (${Math.max(0, left)} tersisa)`;
+    const dx = node.x - t.x, dz = node.z - t.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 4) {
+      this.traitorIdx += 1;
+      return;
     }
-    return { mission: pickText(m.title, lang()), text };
+    const speed = 4.5;
+    t.x += (dx / dist) * speed * dt;
+    t.z += (dz / dist) * speed * dt;
+    t.heading = Math.atan2(dx, dz);
+    t.mesh.position.set(t.x, 0, t.z);
+    t.mesh.rotation.y = t.heading;
   }
-
-  return {
-    state,
-    missions: MISSIONS,
-    update,
-    startMission,
-    currentMission,
-    currentStage,
-    waypoint,
-    objectiveText,
-    failMission,
-    get active() { return currentMission(); },
-    get progress() {
-      return { completed: state.completed.length, total: MISSIONS.length, storyComplete: state.storyComplete, ending: state.ending };
-    },
-  };
 }

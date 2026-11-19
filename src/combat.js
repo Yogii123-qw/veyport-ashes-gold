@@ -1,253 +1,359 @@
-// combat.js — the full firing stack (F6).
-//
-// Phase 1 shipped a minimal hitscan core in player.js. This module owns
-// fire from here on: it registers the three heavy weapons, and player.js
-// delegates its tryFire to the handler installed here. Every shot is
-// real — a ray from the muzzle, per-weapon spread and pellets, headshots
-// worth double on armed targets, glass that shatters, casings that fly,
-// recoil you can feel in the camera, and a hit marker that only appears
-// when something was actually hit. Nothing here is a no-op overlay.
+// combat.js - shooting, melee, and damage resolution (F6).
+// Every shot is a real ray: origin at the player's hand, direction from
+// the camera yaw, first hit wins. Muzzle flash (sprite + the player's
+// light), tracers, impact dust/sparks, shell casings, glass shatter on
+// shop fronts, hitmarkers, per-weapon fire rates, and headshots by
+// geometry (a centered hit on an armed target counts double).
 
-import * as THREE from '../vendor/three.min.js';
-import { registerWeapon, WEAPONS } from './player.js';
+const THREE = window.THREE;
 
-/** The heavy arsenal. Prices and ammo match SPEC §3.4. */
-export const HEAVY_WEAPONS = {
-  kr9: {
-    id: 'kr9', name: { en: 'KR-9 Ripper', id: 'KR-9 Ripper' }, kind: 'smg',
-    damage: 16, range: 30, auto: true, reloadTime: 1.4, price: 600,
-    ammoPrice: 40, ammoPack: 60, magSize: 30, fireInterval: 0.085,
-  },
-  iron12: {
-    id: 'iron12', name: { en: 'Iron-12', id: 'Iron-12' }, kind: 'scattergun',
-    damage: 8, range: 15, auto: false, reloadTime: 2.0, price: 450,
-    ammoPrice: 30, ammoPack: 12, magSize: 6, fireInterval: 0.8, pellets: 6,
-  },
-  vk7: {
-    id: 'vk7', name: { en: 'VK-7 Carbine', id: 'VK-7 Carbine' }, kind: 'rifle',
-    damage: 40, range: 80, auto: true, reloadTime: 1.8, price: 1200,
-    ammoPrice: 60, ammoPack: 40, magSize: 30, fireInterval: 0.11,
-  },
+const FIRE_INTERVAL = {
+  pistol: 0.28, smg: 0.09, scattergun: 0.9, rifle: 0.11, melee: 0.45,
 };
 
-export function registerHeavyWeapons() {
-  for (const def of Object.values(HEAVY_WEAPONS)) registerWeapon(def);
+const GLASS_FRONTS = [
+  // Thin boxes on the street-facing side of the bar and the gun shop.
+  // The bar sits 24 m northwest of its landmark point and the gun shop
+  // 24 m southeast of its, so the glass follows them to their faces.
+  { x0: 265, z0: -167, x1: 287, z1: -165, name: 'bar' },
+  { x0: 465, z0: 30, x1: 483, z1: 32, name: 'gunshop' },
+];
+
+// Ray vs AABB (slab test) in 2D + height band. Returns distance or Infinity.
+function rayHitBox(ox, oz, dx, dz, b) {
+  let t0 = 0, t1 = Infinity;
+  const axes = [[ox, dx, b.x0, b.x1], [oz, dz, b.z0, b.z1]];
+  for (const [o, d, lo, hi] of axes) {
+    if (Math.abs(d) < 1e-9) {
+      if (o < lo || o > hi) return Infinity;
+    } else {
+      let ta = (lo - o) / d, tb = (hi - o) / d;
+      if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+      t0 = Math.max(t0, ta);
+      t1 = Math.min(t1, tb);
+      if (t0 > t1) return Infinity;
+    }
+  }
+  return t0;
 }
 
-/** Ray vs a standing target (vertical capsule approx). Returns the
- *  distance along the ray, or Infinity. `head` is set when the closest
- *  approach is above shoulder height. */
-function rayVsTarget(ox, oy, oz, dx, dy, dz, tx, tz, radius, height) {
-  const cx = tx - ox;
-  const cz = tz - oz;
-  const t = cx * dx + cz * dz;
-  if (t < 0) return { t: Infinity, head: false };
-  const px = ox + dx * t;
-  const pz = oz + dz * t;
-  const py = oy + dy * t;
-  const horiz = Math.hypot(px - tx, pz - tz);
-  if (horiz > radius) return { t: Infinity, head: false };
-  if (py < 0 || py > height) return { t: Infinity, head: false };
-  return { t, head: py > 1.35 };
-}
-
-export function createCombat(deps) {
-  const { city, vehicles, player, bus, effects, audio, cameraRig } = deps;
-  let pedestrians = deps.pedestrians || null;
-  let wanted = deps.wanted || null;
-  registerHeavyWeapons();
-
-  let lastShotAt = -10;
-  const muzzleWorld = new THREE.Vector3();
-  const rayDir = new THREE.Vector3();
-  const tmpDir = new THREE.Vector3();
-  const aimPoint = new THREE.Vector3();
-  const fireDir = new THREE.Vector3();
-
-  function setSystems(sys) {
-    if (sys.pedestrians) pedestrians = sys.pedestrians;
-    if (sys.wanted) wanted = sys.wanted;
+export class CombatSys {
+  constructor(w) {
+    this.w = w;
+    this.targets = [];
+    this.cooldown = 0;
+    this.meleeTimer = 0;
+    this.casings = [];
+    this.tracers = [];
+    this.tracerTimer = [];
+    if (w.scene) {
+      for (let i = 0; i < 12; i++) {
+        const m = new THREE.Mesh(
+          new THREE.BoxGeometry(0.05, 0.05, 0.12),
+          new THREE.MeshLambertMaterial({ color: 0xd8b030 }),
+        );
+        m.visible = false;
+        w.scene.add(m);
+        this.casings.push({ mesh: m, life: 0, vx: 0, vy: 0, vz: 0 });
+      }
+      for (let i = 0; i < 4; i++) {
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+        const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xffe8a0, transparent: true, opacity: 0 }));
+        line.frustumCulled = false;
+        w.scene.add(line);
+        this.tracers.push(line);
+        this.tracerTimer.push(0);
+      }
+    }
+    this.tracerIdx = 0;
   }
 
-  /** Collect every shootable thing and find the nearest along the ray. */
-  function pickTarget(origin, dir, range) {
+  register(t) {
+    if (!this.targets.includes(t)) this.targets.push(t);
+  }
+
+  unregister(t) {
+    const i = this.targets.indexOf(t);
+    if (i >= 0) this.targets.splice(i, 1);
+  }
+
+  // Aim direction: the camera yaw, horizontal. Aiming snaps the player
+  // to face the same way, so the gun points where the camera looks.
+  aimDir() {
+    const yaw = this.w.rig ? this.w.rig.yaw : this.w.player.heading;
+    return { x: Math.sin(yaw), z: Math.cos(yaw), yaw };
+  }
+
+  // Called every step while the fire button is held. Semi-auto weapons
+  // fire once per press interval; autos fire while held.
+  tryShoot() {
+    const p = this.w.player;
+    if (!p.onFoot || p.enterTimer > 0) return null;
+    if (this.cooldown > 0) return null;
+    const def = p.weaponDef();
+    if (def.kind === 'melee') return this.melee();
+    const res = p.fire();
+    if (res !== 'fired') {
+      if (res === 'dry' && this.w.ui) this.w.ui.notify(this.w.lang.t('noAmmo'), 'warn');
+      return res;
+    }
+    this.cooldown = FIRE_INTERVAL[def.kind] || 0.25;
+    this.resolveShot(def);
+    return 'fired';
+  }
+
+  resolveShot(def) {
+    const w = this.w;
+    const p = w.player;
+    const dir = this.aimDir();
+    p.heading = dir.yaw;
+    p.group.rotation.y = dir.yaw;
+    const ox = p.x + dir.x * 0.5;
+    const oz = p.z + dir.z * 0.5;
+    const oy = 1.25;
+    const range = def.range;
+    // Muzzle flash + shot sound (pan by camera-relative direction).
+    if (w.fx) w.fx.muzzle(ox, oy, oz, dir.x, dir.z);
+    if (w.audio) w.audio.shot(def.kind, 0);
+    this._ejectCasing(ox, oy, oz, dir);
+    if (w.stats) w.stats.shots += 1;
+    const pellets = def.pellets || 1;
+    let anyHit = false;
+    for (let i = 0; i < pellets; i++) {
+      const spread = pellets > 1 ? (Math.random() - 0.5) * 0.09 : (Math.random() - 0.5) * 0.012;
+      const a = dir.yaw + spread;
+      const dx = Math.sin(a), dz = Math.cos(a);
+      const hit = this._ray(ox, oy, oz, dx, dz, range, def, pellets);
+      if (hit) anyHit = true;
+    }
+    // Camera kick: a small trauma bump on every shot (F6 recoil feel).
+    if (w.rig) w.rig.addTrauma(0.045, 0, 2, true);
+    return anyHit;
+  }
+
+  // One ray. Returns the hit record or null.
+  _ray(ox, oy, oz, dx, dz, range, def, pellets) {
+    const w = this.w;
     let best = null;
-    let bestT = range;
-    let bestHead = false;
-    const consider = (obj, kind, tx, tz, radius, height) => {
-      const r = rayVsTarget(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, tx, tz, radius, height);
-      if (r.t < bestT) {
-        bestT = r.t;
-        bestHead = r.head;
-        best = { obj, kind, t: r.t, head: r.head };
-      }
-    };
-    for (const v of vehicles.vehicles) {
-      if (v.wrecked) continue;
-      consider(v, 'vehicle', v.x, v.z, 1.6, 1.6);
+    let bestD = range;
+    // Targets: nearest circle hit along the ray. Vehicles use their
+    // damage pool (skip when wrecked); people use hp/alive.
+    for (const t of this.targets) {
+      if (t.wrecked) continue;
+      if (t.hp !== undefined && (t.hp <= 0 || t.alive === false)) continue;
+      const rx = t.x - ox, rz = t.z - oz;
+      const along = rx * dx + rz * dz;
+      if (along < 0 || along > bestD) continue;
+      const perp = Math.abs(rx * dz - rz * dx);
+      const radius = t.radius || 0.6;
+      if (perp > radius) continue;
+      best = { kind: 'target', t, d: along, perp, radius };
+      bestD = along;
     }
-    if (pedestrians) {
-      for (const p of pedestrians.peds) {
-        if (!p.alive) continue;
-        consider(p, 'ped', p.x, p.z, 0.55, 1.8);
-      }
-    }
-    if (wanted) {
-      for (const u of wanted.police) {
-        if (!u.alive) continue;
-        consider(u, 'police', u.x, u.z, 0.6, 1.8);
+    // Buildings stop the ray (unless it is a glass front, which shatters).
+    for (const b of this.w.colliders) {
+      const d = rayHitBox(ox, oz, dx, dz, b);
+      if (d < bestD) {
+        best = { kind: 'wall', d };
+        bestD = d;
       }
     }
-    return { best, bestT, bestHead };
+    // Glass fronts: the ray passes through after shattering.
+    for (const g of GLASS_FRONTS) {
+      const d = rayHitBox(ox, oz, dx, dz, g);
+      if (d < bestD && d < range) {
+        if (w.fx) w.fx.glass(ox + dx * d, 1.3, oz + dz * d);
+        if (w.audio) w.audio.glass();
+        best = { kind: 'glass', d };
+        bestD = d;
+        break;
+      }
+    }
+    const endX = ox + dx * bestD;
+    const endZ = oz + dz * bestD;
+    this._tracer(ox, oy, oz, endX, 1.1, endZ);
+    if (!best) return null;
+    if (best.kind === 'target') {
+      const t = best.t;
+      let dmg = def.damage;
+      // Falloff: -35% at max range.
+      dmg *= 1 - 0.35 * (best.d / def.range);
+      // Headshot by geometry: a centered hit on an armed target doubles.
+      let headshot = false;
+      if (t.armed && best.perp < best.radius * 0.3) {
+        dmg *= 2;
+        headshot = true;
+      }
+      if (pellets > 1) dmg /= pellets;
+      dmg = Math.max(1, Math.round(dmg));
+      this._damageTarget(t, dmg, headshot);
+      if (w.stats) w.stats.hits += 1;
+      if (w.ui) w.ui.hitmarker(t.hp <= 0);
+      if (w.audio) w.audio.hitmarker(t.hp <= 0);
+      return { target: t, damage: dmg, headshot };
+    }
+    if (best.kind === 'wall') {
+      if (w.fx) w.fx.impact(endX, 1.1, endZ, true);
+      return { wall: true };
+    }
+    if (best.kind === 'glass') {
+      if (w.fx) w.fx.impact(endX, 1.1, endZ, false);
+      return { glass: true };
+    }
+    return null;
   }
 
-  function applyDamage(hit, def) {
-    let dmg = def.damage * (hit.head ? 2 : 1);
-    if (hit.kind === 'vehicle') {
-      vehicles.damage(hit.obj, dmg, 'shot');
-    } else if (hit.kind === 'ped') {
-      pedestrians.damage(hit.obj, dmg, { head: hit.head, weapon: def.id });
-    } else if (hit.kind === 'police') {
-      wanted.damagePolice(hit.obj, dmg, { head: hit.head, weapon: def.id });
+  _damageTarget(t, dmg, headshot) {
+    const w = this.w;
+    if (t.truckHp !== undefined) {
+      t.truckHp -= dmg;
+      if (t.truckHp <= 0 && !t.wrecked) {
+        t.wrecked = true;
+        t.speed = 0;
+        if (w.fx) w.fx.explosion(t.x, 1, t.z);
+        if (w.audio) w.audio.explosion();
+        if (w.ui) w.ui.notify(w.lang.t('truckStopped'), 'good');
+      }
+      if (t.onHit) t.onHit(dmg, headshot);
+      return;
     }
-    return dmg;
+    if (t.damage !== undefined && t.def) {
+      // A vehicle: damage is its 0-100 integrity pool.
+      t.damage -= dmg * 0.4;
+      if (t.damage <= 0) {
+        t.damage = 0;
+        t.wrecked = true;
+        t.speed = 0;
+        if (w.fx) w.fx.explosion(t.x, 1, t.z);
+        if (w.audio) w.audio.explosion();
+        if (t.onDie) t.onDie(t);
+      }
+      if (t.onHit) t.onHit(dmg, headshot);
+      return;
+    }
+    t.hp -= dmg;
+    if (t.onHit) t.onHit(dmg, headshot);
+    if (t.hp <= 0) {
+      t.alive = false;
+      if (t.onDie) t.onDie(t);
+    }
   }
 
-  function fireOnePellet(origin, dir, def, spread) {
-    tmpDir.copy(dir);
-    if (spread > 0) {
-      // Small random cone around the aim direction.
-      tmpDir.x += (Math.random() - 0.5) * spread;
-      tmpDir.y += (Math.random() - 0.5) * spread;
-      tmpDir.z += (Math.random() - 0.5) * spread;
-      tmpDir.normalize();
+  // Melee swing: everything in a 2.2 m arc in front takes damage.
+  melee() {
+    if (this.meleeTimer > 0) return null;
+    this.meleeTimer = FIRE_INTERVAL.melee;
+    const w = this.w;
+    const p = w.player;
+    const dir = this.aimDir();
+    p.heading = dir.yaw;
+    p.group.rotation.y = dir.yaw;
+    if (w.audio) w.audio.shot('melee', 0);
+    let hitAny = false;
+    for (const t of this.targets) {
+      if (t.wrecked) continue;
+      if (t.hp !== undefined && (t.hp <= 0 || t.alive === false)) continue;
+      const dx = t.x - p.x, dz = t.z - p.z;
+      const d = Math.hypot(dx, dz);
+      if (d > 2.2) continue;
+      const dot = (dx * dir.x + dz * dir.z) / Math.max(0.01, d);
+      if (dot < 0.5) continue;
+      this._damageTarget(t, 15, false);
+      hitAny = true;
+      if (w.fx) w.fx.impact(t.x, 1.2, t.z, false);
+      if (w.ui) w.ui.hitmarker(t.hp <= 0);
     }
-    const { best, bestT } = pickTarget(origin, tmpDir, def.range);
-    const wallT = city.raycastBuildings(origin.x, origin.y, origin.z, tmpDir.x, tmpDir.y, tmpDir.z, def.range);
-    const endT = Math.min(bestT, wallT);
-    const end = new THREE.Vector3(
-      origin.x + tmpDir.x * endT,
-      origin.y + tmpDir.y * endT,
-      origin.z + tmpDir.z * endT,
-    );
-    return { best, bestT, wallT, end, dir: tmpDir.clone() };
+    return hitAny ? 'melee-hit' : 'melee';
   }
 
-  function tryFire(camera, now) {
-    const state = player.state;
-    if (state.inVehicle || state.entering > 0) return false;
-    const def = WEAPONS[state.currentWeapon];
-    if (!def || now - lastShotAt < def.fireInterval) return false;
-    if (state.reloading > 0) return false;
-    const w = state.weapons[state.currentWeapon];
-    if (def.kind !== 'melee' && w.ammo <= 0) {
-      player.reload();
-      audio.play('dry');
-      return false;
-    }
-    lastShotAt = now;
-    if (def.kind !== 'melee') w.ammo -= 1;
-
-    player.muzzleWorld(muzzleWorld);
-    camera.getWorldDirection(rayDir);
-
-    if (def.kind === 'melee') {
-      // Swing arc: the nearest living target within 2.2 m in front.
-      let best = null;
-      let bestD = 2.3;
-      const fx = Math.sin(state.heading);
-      const fz = Math.cos(state.heading);
-      const consider = (obj, kind, tx, tz) => {
-        const dx = tx - state.x;
-        const dz = tz - state.z;
-        const d = Math.hypot(dx, dz);
-        const ahead = (dx * fx + dz * fz) / Math.max(d, 0.001);
-        if (d < bestD && ahead > 0.4) { bestD = d; best = { obj, kind }; }
-      };
-      for (const v of vehicles.vehicles) {
-        if (!v.wrecked) consider(v, 'vehicle', v.x, v.z);
-      }
-      if (pedestrians) for (const p of pedestrians.peds) if (p.alive) consider(p, 'ped', p.x, p.z);
-      if (wanted) for (const u of wanted.police) if (u.alive) consider(u, 'police', u.x, u.z);
-      effects.meleeArc(state.x, 0, state.z, state.heading);
-      audio.play('melee');
-      if (best) {
-        if (best.kind === 'vehicle') vehicles.damage(best.obj, def.damage, 'melee');
-        else if (best.kind === 'ped') pedestrians.damage(best.obj, def.damage, { weapon: 'fists' });
-        else wanted.damagePolice(best.obj, def.damage, { weapon: 'fists' });
-        bus.emit('hit', { x: best.obj.x, y: 1, z: best.obj.z, weapon: def.id });
-      }
-      bus.emit('shot', { weapon: def.id, hit: !!best, muzzle: { x: muzzleWorld.x, y: muzzleWorld.y, z: muzzleWorld.z } });
+  // An NPC shoots at a point (usually the player). Returns true on hit.
+  npcShoot(shooter, tx, tz) {
+    const w = this.w;
+    const dx = tx - shooter.x, dz = tz - shooter.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 45 || d < 0.5) return false;
+    const a = Math.atan2(dx, dz);
+    const ox = shooter.x + Math.sin(a) * 0.6;
+    const oz = shooter.z + Math.cos(a) * 0.6;
+    this._tracer(ox, 1.3, oz, tx + (Math.random() - 0.5) * 2, 1.2, tz + (Math.random() - 0.5) * 2);
+    if (w.fx) w.fx.muzzle(ox, 1.3, oz, Math.sin(a), Math.cos(a));
+    if (w.audio) w.audio.shot('pistol', 0);
+    // Hit chance falls with distance; the player can dodge by moving.
+    const p = w.player;
+    const moving = p.onFoot ? p.speed : Math.abs(p.vehicle ? p.vehicle.speed : 0);
+    let chance = 0.3 - d * 0.004 - moving * 0.008;
+    if (Math.random() < Math.max(0.05, chance)) {
+      this.damagePlayer(8 + Math.floor(Math.random() * 5));
       return true;
     }
+    return false;
+  }
 
-    // Ranged: one pellet for most guns, six for the scattergun.
-    // Converging aim: the bullet must go where the crosshair points.
-    // Firing parallel to the camera's downward tilt from a hip-height
-    // muzzle (y ~0.78) dives the ray underground ~7 m out, so a truck
-    // at 8 m could never be hit even with a clear lane. Cast the
-    // camera ray to its first hit (vehicle or wall) and fire from the
-    // muzzle toward that aim point instead; the spread cone still
-    // applies per pellet around it.
-    const camPick = pickTarget(camera.position, rayDir, def.range);
-    const camWallT = city.raycastBuildings(
-      camera.position.x, camera.position.y, camera.position.z,
-      rayDir.x, rayDir.y, rayDir.z, def.range);
-    const aimT = Math.min(camPick.bestT, camWallT);
-    aimPoint.copy(camera.position).addScaledVector(rayDir, aimT);
-    fireDir.copy(aimPoint).sub(muzzleWorld).normalize();
-    const pellets = def.pellets || 1;
-    const spread = def.kind === 'scattergun' ? 0.09 : def.kind === 'smg' ? 0.035 : 0.012;
-    let anyHit = false;
-    let anyKill = false;
-    for (let i = 0; i < pellets; i++) {
-      const { best, bestT, wallT, end, dir } = fireOnePellet(muzzleWorld, fireDir, def, spread);
-      // Tracer: a real line from the muzzle to the impact point.
-      effects.tracer(muzzleWorld, end);
-      if (best && bestT <= wallT) {
-        const dmg = applyDamage(best, def);
-        bus.emit('hit', { x: end.x, y: end.y, z: end.z, weapon: def.id, head: best.head, damage: dmg });
-        anyHit = true;
-        if ((best.kind === 'ped' && !best.obj.alive) || (best.kind === 'police' && !best.obj.alive)) anyKill = true;
-      } else if (wallT < Infinity) {
-        // Glass shatters when the ray meets a facade at window height.
-        const material = end.y > 1.1 && end.y < 4.2 && Math.random() < 0.45 ? 'glass' : 'wall';
-        bus.emit('impact', { x: end.x, y: end.y, z: end.z, weapon: def.id, material });
-        if (material === 'glass') audio.play('glass');
+  // Armor absorbs 60% of incoming damage, then health takes the rest.
+  damagePlayer(amount) {
+    const p = this.w.player;
+    if (p.armor > 0) {
+      const absorbed = Math.min(p.armor, amount * 0.6);
+      p.armor -= absorbed;
+      p.hp -= (amount - absorbed);
+    } else {
+      p.hp -= amount;
+    }
+    if (this.w.rig) this.w.rig.addTrauma(0.12, 0, 3, true);
+  }
+
+  _ejectCasing(ox, oy, oz, dir) {
+    const c = this.casings.find((x) => x.life <= 0);
+    if (!c) return;
+    const rightX = -dir.z, rightZ = dir.x;
+    c.mesh.position.set(ox + rightX * 0.3, oy, oz + rightZ * 0.3);
+    c.mesh.visible = true;
+    c.vx = rightX * 1.6 + (Math.random() - 0.5);
+    c.vy = 2.2 + Math.random();
+    c.vz = rightZ * 1.6 + (Math.random() - 0.5);
+    c.life = 1.4;
+  }
+
+  _tracer(x0, y0, z0, x1, y1, z1) {
+    if (this.tracers.length === 0) return;
+    const line = this.tracers[this.tracerIdx];
+    const idx = this.tracerIdx;
+    this.tracerIdx = (this.tracerIdx + 1) % this.tracers.length;
+    const pos = line.geometry.attributes.position.array;
+    pos[0] = x0; pos[1] = y0; pos[2] = z0;
+    pos[3] = x1; pos[4] = y1; pos[5] = z1;
+    line.geometry.attributes.position.needsUpdate = true;
+    line.material.opacity = 0.9;
+    this.tracerTimer[idx] = 0.08;
+  }
+
+  update(dt) {
+    if (this.cooldown > 0) this.cooldown -= dt;
+    if (this.meleeTimer > 0) this.meleeTimer -= dt;
+    for (const c of this.casings) {
+      if (c.life <= 0) continue;
+      c.life -= dt;
+      if (c.life <= 0) {
+        c.mesh.visible = false;
+        continue;
       }
-      // Keep the tracer endpoint visible one frame via the burst above.
-      void dir;
+      c.vy -= 9.8 * dt;
+      c.mesh.position.x += c.vx * dt;
+      c.mesh.position.y += c.vy * dt;
+      c.mesh.position.z += c.vz * dt;
+      if (c.mesh.position.y < 0.05) {
+        c.mesh.position.y = 0.05;
+        c.vy = 0; c.vx *= 0.8; c.vz *= 0.8;
+      }
+      c.mesh.rotation.x += dt * 9;
+      c.mesh.rotation.z += dt * 7;
     }
-
-    // Muzzle flash + casing + sound + recoil, once per trigger pull.
-    bus.emit('shot', { weapon: def.id, hit: anyHit, muzzle: { x: muzzleWorld.x, y: muzzleWorld.y, z: muzzleWorld.z } });
-    const rightX = Math.cos(state.heading);
-    const rightZ = -Math.sin(state.heading);
-    effects.ejectCasing(muzzleWorld.x, muzzleWorld.y, muzzleWorld.z, rightX, rightZ);
-    audio.play('shot', { weapon: def.id });
-    if (cameraRig) {
-      cameraRig.addTrauma(def.kind === 'scattergun' ? 0.22 : def.kind === 'rifle' ? 0.16 : 0.1);
-      cameraRig.addRecoil(def.kind === 'scattergun' ? 0.05 : 0.028);
+    for (let i = 0; i < this.tracers.length; i++) {
+      if (this.tracerTimer[i] > 0) {
+        this.tracerTimer[i] -= dt;
+        if (this.tracerTimer[i] <= 0) this.tracers[i].material.opacity = 0;
+      }
     }
-    if (anyHit) audio.play('hit');
-    if (anyKill) {
-      audio.play('kill');
-      bus.emit('kill', { weapon: def.id });
-    }
-    return true;
   }
-
-  function update(dt) {
-    void dt;
-    // Combat has no per-frame state of its own right now; the handler
-    // above runs on the trigger pull. Kept for the step() contract.
-  }
-
-  return {
-    tryFire,
-    update,
-    setSystems,
-    pickTarget,
-    get weapons() { return HEAVY_WEAPONS; },
-  };
 }

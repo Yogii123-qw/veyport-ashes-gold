@@ -1,89 +1,80 @@
-// vehiclesData.js — the whole vehicle roster as data, rewritten in phase 2.
-//
-// The numbers are unchanged from the phase-1 tune (F7 verified every
-// class on a straight line: t90 4.25–6.43 s, cruise 94.7–97.8%). What
-// changed is the shape: one compact table drives the roster, so a new
-// car is one row, and the class helpers the new systems need live here
-// (police types for wanted.js, class lookup for missions, the F4
-// supercar set). Physics reads these numbers; it never invents its own.
-// Every marque and model name is invented for Veyport — no real car
-// brands anywhere.
-//
-// Columns: id, name, class, topSpeed m/s, accel m/s^2, brake, grip,
-// steer, durability, mass kg, sell $, length/width/height m,
-// seatHeight m, paint colours, engine note, extras.
+// vehiclesData.js - the fleet of Veyport, as pure data.
+// Every number lives here; the driving code reads it, never hardcodes it.
+// Acceleration uses a power curve: a(v) = pull * (1 - (v/top)^2).
+// pull is tuned per class so 0 to 90% of top speed lands in 3.73-4.52 s
+// (the F7 feel target). For that curve, v(t) = top * tanh(pull * t / top),
+// so t90 = atanh(0.9) * top / pull = 1.472 * top / pull.
 
-const ROWS = [
-  // id,          name,            cls,       top, acc, brk, grip, str, dur, mass, sell, L,    W,    H,    seat, colors, engine, extras
-  ['pico',        'Pico',          'hatch',   30, 11.0, 18, 6.5, 2.4, 60,  900,  200,  3.6, 1.7,  1.45, 0.55, [0xd8d3c8, 0x7a8a99, 0xc23a2a, 0x3f8a5f, 0xe8b23c, 0x2a6ab8], 'small', {}],
-  ['komodo',      'Komodo',        'sedan',   36, 13.0, 19, 5.5, 2.2, 80,  1300, 300,  4.4, 1.8,  1.45, 0.55, [0x2e3a46, 0xc8c2b4, 0xa83232, 0x33475c, 0x2a7a5a, 0xc2702a], 'mid', {}],
-  ['swift',       'Swift',         'coupe',   48, 18.0, 22, 6.0, 2.6, 55,  1100, 500,  4.2, 1.8,  1.25, 0.50, [0xc22e2e, 0xeeeeee, 0x2244aa, 0xe8b23c, 0x222222, 0x2a9a6a], 'sport', {}],
-  ['bulldog',     'Bulldog',       'muscle',  52, 20.0, 20, 4.2, 2.0, 75,  1500, 650,  4.6, 1.9,  1.40, 0.55, [0x1c1c1c, 0x8a2020, 0x2f6a3a, 0xd8d3c8, 0x3a3a8a, 0xc2702a], 'v8', {}],
-  ['vagabond',    'Vagabond',      'suv',     38, 14.0, 18, 5.0, 2.1, 110, 1900, 450,  4.5, 1.9,  1.80, 0.70, [0x4a6a3a, 0xc2702a, 0x2e3a46, 0x3a6a8a, 0x8a2a3a, 0xd8d3c8], 'mid', {}],
-  ['hauler',      'Hauler',        'van',     30, 10.0, 16, 4.5, 1.9, 120, 2200, 350,  4.8, 1.9,  2.00, 0.70, [0xd8d3c8, 0x7a8a99, 0x2a6ab8, 0x555555, 0x3f8a5f, 0xc23a2a], 'diesel', {}],
-  ['longnose',    'Longnose',      'truck',   28, 9.0,  15, 4.0, 1.7, 160, 3200, 550,  5.6, 2.0,  2.20, 0.80, [0xc23a2a, 0x3a5a7a, 0xd9a441, 0x6a6a6a, 0x2f6a3a, 0xe8b23c], 'diesel', {}],
-  ['cab',         'City Cab',      'taxi',    36, 13.0, 19, 5.5, 2.2, 80,  1300, 250,  4.4, 1.8,  1.50, 0.55, [0xe8b23c], 'mid', { taxi: true }],
-  ['interceptor', 'CPD Interceptor','police', 54, 19.0, 24, 6.2, 2.5, 120, 1500, 0,    4.5, 1.85, 1.45, 0.55, [0x1a2330], 'sport', { police: true }],
-  ['cpdvan',      'CPD Van',       'police',  34, 11.5, 17, 4.6, 1.9, 150, 2400, 0,    4.9, 1.95, 2.10, 0.70, [0x1a2330], 'diesel', { police: true }],
-  ['armored',     'Gold Hauler',   'armored', 28, 9.5,  15, 4.2, 1.7, 220, 4200, 0,    5.8, 2.1,  2.40, 0.80, [0x4a4a48], 'diesel', { missionOnly: true }],
-  // Supercars: invented marques, each with its own silhouette.
-  // Obsidian: sharp angular wedge, scissor-door seams, big rear wing.
-  ['obsidian', 'Obsidian', 'supercar', 68, 26.0, 26, 6.8, 2.8, 45, 1100, 1400, 4.5, 2.0, 1.10, 0.45, [0x1c1c22, 0xc22e2e, 0xe8b23c, 0x2a6ab8, 0xe8e8e8], 'hyper', { bodyStyle: { nose: 'wedge', spoiler: 'wing', doors: 'scissor', roof: 'coupe' } }],
-  // Seraph: sleek mid-engine coupe, ducktail spoiler, side intakes.
-  ['seraph', 'Seraph', 'supercar', 70, 27.0, 26, 7.0, 2.9, 45, 1050, 1600, 4.4, 1.95, 1.15, 0.45, [0xd8232a, 0xf2f2f2, 0x1a1a1a, 0xffd23c, 0x3a7ab8], 'hyper', { bodyStyle: { nose: 'smooth', spoiler: 'ducktail', doors: 'standard', roof: 'coupe' } }],
-  // Osprey: low and curved, dihedral-door seams, low rear wing.
-  ['osprey', 'Osprey', 'supercar', 72, 28.0, 27, 7.2, 3.0, 40, 1000, 1800, 4.3, 1.9, 1.05, 0.42, [0x2a7a9a, 0xe86a2a, 0x222222, 0xd8d8d8, 0x6a2a8a], 'hyper', { bodyStyle: { nose: 'smooth', spoiler: 'wing', doors: 'dihedral', roof: 'coupe' } }],
-  // Quasar: the hypercar — lowest, longest, widest wing, fastest in the game.
-  ['quasar', 'Quasar', 'supercar', 78, 30.0, 28, 7.2, 2.9, 38, 1150, 2500, 4.6, 2.05, 1.05, 0.42, [0x111111, 0xb8b8c8, 0x20b868, 0xc22e2e, 0xf2a33c], 'hyper', { bodyStyle: { nose: 'wedge', spoiler: 'wing', doors: 'scissor', roof: 'coupe' } }],
-  // Lumen: open-top roadster — low windshield, headrest humps, lip spoiler.
-  ['lumen', 'Lumen', 'supercar', 64, 23.0, 25, 6.5, 2.7, 42, 950, 1200, 4.2, 1.9, 1.00, 0.42, [0xe8b23c, 0x3cd2ff, 0xf2f2f2, 0xff5a8a, 0x2f6b4f], 'hyper', { bodyStyle: { nose: 'smooth', spoiler: 'lip', doors: 'standard', roof: 'roadster' } }],
-];
+export const T90_FLOOR = 3.73;
+export const T90_CEIL = 4.52;
 
-function rowToDef(r) {
-  const [id, name, cls, topSpeed, accel, brake, grip, steer, durability, mass, sell, length, width, height, seatHeight, colors, engine, extras] = r;
+// pull from a target t90: pull = 1.472 * top / t90
+function pullFor(top, t90) {
+  return +(1.472 * top / t90).toFixed(2);
+}
+
+function cls(o) {
   return {
-    id, name: { en: name, id: name }, cls,
-    topSpeed, accel, brake, grip, steer, durability, mass, sell,
-    length, width, height, seatHeight, colors, engine,
-    taxi: !!extras.taxi, police: !!extras.police, missionOnly: !!extras.missionOnly,
-    bodyStyle: extras.bodyStyle || null,
+    id: o.id, name: o.name, kind: o.kind, top: o.top,
+    pull: pullFor(o.top, o.t90), t90: o.t90,
+    brake: o.brake, grip: o.grip, steer: o.steer,
+    durability: o.durability, mass: o.mass, price: o.price,
+    len: o.len, wid: o.wid, hei: o.hei,
+    colors: o.colors, engine: o.engine, note: o.note || '',
+    spoiler: !!o.spoiler, police: !!o.police, taxi: !!o.taxi,
   };
 }
 
-export const VEHICLES = {};
-for (const r of ROWS) VEHICLES[r[0]] = rowToDef(r);
-
-/** Every type the player can meet on the street or in a parking spot. */
-export const CIVILIAN_TYPES = [
-  'pico', 'komodo', 'swift', 'bulldog', 'vagabond', 'hauler', 'longnose', 'cab',
-  'obsidian', 'seraph', 'osprey', 'quasar', 'lumen',
+export const VEHICLE_CLASSES = [
+  cls({ id: 'pico', name: 'Pico', kind: 'hatchback', top: 32, t90: 4.40, brake: 14, grip: 0.95, steer: 2.6, durability: 45, mass: 950, price: 3200, len: 3.6, wid: 1.7, hei: 1.45, colors: [0x3a7bd5, 0xd8d8d8, 0xe0a030, 0x7a4a8a], engine: '1.2L buzz', note: 'city hatchback' }),
+  cls({ id: 'komodo', name: 'Komodo', kind: 'sedan', top: 38, t90: 4.30, brake: 15, grip: 0.9, steer: 2.5, durability: 60, mass: 1350, price: 6800, len: 4.4, wid: 1.85, hei: 1.42, colors: [0x2e4a6b, 0x8a8f96, 0x5a2e2e, 0xd8d8d8], engine: '2.0L hum', note: 'everyday sedan' }),
+  cls({ id: 'swift', name: 'Swift', kind: 'coupe', top: 48, t90: 4.10, brake: 17, grip: 1.0, steer: 2.8, durability: 50, mass: 1250, price: 14500, len: 4.3, wid: 1.9, hei: 1.28, colors: [0xc03028, 0x1e5cb8, 0xe8e8e8, 0x222222], engine: '2.4L snarl', note: 'sport coupe' }),
+  cls({ id: 'bulldog', name: 'Bulldog', kind: 'muscle', top: 46, t90: 3.90, brake: 15, grip: 0.72, steer: 2.3, durability: 65, mass: 1650, price: 18900, len: 4.7, wid: 1.95, hei: 1.38, colors: [0x1a1a1a, 0x8a1a1a, 0x2a4a2a, 0xd8b030], engine: '5.7L V8 roar', note: 'muscle, loose tail' }),
+  cls({ id: 'vagabond', name: 'Vagabond', kind: 'suv', top: 40, t90: 4.40, brake: 14, grip: 0.85, steer: 2.2, durability: 80, mass: 1900, price: 12400, len: 4.6, wid: 2.0, hei: 1.78, colors: [0x4a5a3a, 0x6b5a3a, 0x3a3a3a, 0x9ab8c8], engine: '3.0L grunt', note: 'tough SUV' }),
+  cls({ id: 'hauler', name: 'Hauler', kind: 'van', top: 30, t90: 4.50, brake: 12, grip: 0.7, steer: 1.9, durability: 90, mass: 2400, price: 9200, len: 5.0, wid: 2.05, hei: 2.1, colors: [0xd8d8d8, 0x5a6b7a, 0x8a7a4a, 0x3a3a3a], engine: 'diesel clatter', note: 'work van' }),
+  cls({ id: 'longnose', name: 'Longnose', kind: 'truck', top: 28, t90: 4.52, brake: 11, grip: 0.65, steer: 1.7, durability: 100, mass: 3200, price: 15000, len: 5.6, wid: 2.2, hei: 2.3, colors: [0x7a4a2a, 0x4a6b8a, 0x8a8a8a], engine: 'big diesel', note: 'flatbed truck' }),
+  cls({ id: 'cab', name: 'City Cab', kind: 'taxi', top: 38, t90: 4.30, brake: 15, grip: 0.88, steer: 2.5, durability: 60, mass: 1400, price: 7500, len: 4.4, wid: 1.85, hei: 1.45, colors: [0xe8c020], engine: '2.0L hum', note: 'taxi', taxi: true }),
+  cls({ id: 'interceptor', name: 'CPD Interceptor', kind: 'police', top: 55, t90: 3.80, brake: 18, grip: 1.02, steer: 2.9, durability: 85, mass: 1600, price: 0, len: 4.6, wid: 1.95, hei: 1.4, colors: [0x1a2a3a], engine: 'police tune', note: 'police pursuit', police: true, spoiler: true }),
+  cls({ id: 'cpdvan', name: 'CPD Van', kind: 'police', top: 36, t90: 4.40, brake: 13, grip: 0.7, steer: 1.9, durability: 95, mass: 2500, price: 0, len: 5.1, wid: 2.1, hei: 2.2, colors: [0x1a2a3a], engine: 'police diesel', note: 'police transport', police: true }),
+  // Fictional supercars (F4). Fastest in the game, fragile, expensive.
+  cls({ id: 'obsidian', name: 'Obsidian', kind: 'supercar', top: 62, t90: 3.85, brake: 19, grip: 1.05, steer: 3.0, durability: 45, mass: 1400, price: 86000, len: 4.5, wid: 2.0, hei: 1.15, colors: [0x0d0d0d, 0x2a2a3a, 0x4a0a0a], engine: 'V10 shriek', note: 'sharp angular wedge', spoiler: true }),
+  cls({ id: 'seraph', name: 'Seraph', kind: 'supercar', top: 70, t90: 3.77, brake: 20, grip: 1.08, steer: 3.1, durability: 42, mass: 1350, price: 120000, len: 4.4, wid: 1.95, hei: 1.12, colors: [0xe8e8e8, 0xc03028, 0x1e5cb8, 0xd8b030], engine: 'V12 howl', note: 'sleek mid-engine, fastest', spoiler: true }),
+  cls({ id: 'osprey', name: 'Osprey', kind: 'supercar', top: 64, t90: 3.80, brake: 19, grip: 1.06, steer: 3.0, durability: 44, mass: 1380, price: 94000, len: 4.5, wid: 2.02, hei: 1.18, colors: [0x1a4a6b, 0x222222, 0x8a8a8a], engine: 'twin-turbo V8', note: 'low curved GT', spoiler: true }),
+  cls({ id: 'quasar', name: 'Quasar', kind: 'supercar', top: 66, t90: 3.75, brake: 20, grip: 1.1, steer: 3.2, durability: 40, mass: 1300, price: 150000, len: 4.3, wid: 2.05, hei: 1.1, colors: [0x3a0a4a, 0x0d0d0d, 0xb8b8b8], engine: 'hybrid scream', note: 'hypercar, quickest launch', spoiler: true }),
+  cls({ id: 'lumen', name: 'Lumen', kind: 'supercar', top: 60, t90: 3.90, brake: 18, grip: 1.04, steer: 3.0, durability: 46, mass: 1320, price: 78000, len: 4.4, wid: 1.98, hei: 1.2, colors: [0xe8d8a0, 0x4a8a8a, 0xc06030], engine: 'V8 burble', note: 'open-top roadster', spoiler: true }),
+  cls({ id: 'marlin', name: 'Marlin', kind: 'roadster', top: 52, t90: 4.00, brake: 17, grip: 0.98, steer: 2.9, durability: 52, mass: 1200, price: 42000, len: 4.2, wid: 1.9, hei: 1.22, colors: [0x2a6b8a, 0x8a2a4a, 0xe8e8e8], engine: 'flat-six wail', note: 'light roadster' }),
 ];
 
-export const SUPERCAR_TYPES = ['obsidian', 'seraph', 'osprey', 'quasar', 'lumen'];
-export const POLICE_TYPES = ['interceptor', 'cpdvan'];
-export const DRIVABLE_TYPES = Object.keys(VEHICLES).filter((k) => !VEHICLES[k].missionOnly);
+export const CLASS_BY_ID = new Map(VEHICLE_CLASSES.map((c) => [c.id, c]));
 
-/**
- * Everyday traffic mix. Supercars are NOT in this bag: traffic spawns them
- * through a separate rare roll, so they stay rare on the road.
- */
-export const TRAFFIC_WEIGHTS = {
-  pico: 3, komodo: 3, swift: 1, bulldog: 1, vagabond: 2, hauler: 2, longnose: 1, cab: 2,
-};
-
-/** Traffic spawns a supercar on this fraction of spawns (rare, stealable). */
-export const SUPERCAR_TRAFFIC_CHANCE = 0.04;
-
-/** All vehicle defs of one class (e.g. 'supercar', 'police'). */
-export function vehiclesByClass(cls) {
-  return Object.values(VEHICLES).filter((v) => v.cls === cls);
+// Power-curve acceleration at a given speed (m/s^2). Pure function.
+export function accelAt(def, speed) {
+  const s = Math.min(Math.abs(speed), def.top);
+  return def.pull * (1 - (s / def.top) * (s / def.top));
 }
 
-export function vehicleName(def, lang) {
-  return def.name[lang] || def.name.en;
+// Simulate 0 to 90% of top speed at 60 Hz; returns seconds. Pure, node-testable.
+export function timeTo90(def) {
+  let v = 0;
+  const target = def.top * 0.9;
+  const dt = 1 / 60;
+  let t = 0;
+  while (v < target && t < 30) {
+    v += accelAt(def, v) * dt;
+    t += dt;
+  }
+  return +t.toFixed(2);
 }
 
-/** Top speed in km/h, for the HUD speedometer. */
-export function topSpeedKmh(def) {
-  return Math.round(def.topSpeed * 3.6);
+// Steering rate at a speed, after the high-speed cut (P6): full lock stays
+// calm at 250 km/h. Returns radians per second at full deflection.
+export function steerRateAt(def, speed, steerIn) {
+  const s = Math.abs(speed);
+  const speedFactor = Math.min(1, s / 7);
+  const cut = 1 - 0.65 * Math.min(1, s / def.top);
+  return steerIn * def.steer * speedFactor * cut * (speed < 0 ? -1 : 1);
+}
+
+export function kmh(ms) {
+  return Math.round(ms * 3.6);
 }

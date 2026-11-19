@@ -1,155 +1,93 @@
-// minimap.js — the minimap, the full map, and the route line.
-//
-// North-up, 220 px in the corner, redrawn at most every 150 ms. It
-// shows roads, districts, landmarks, the player's arrow, traffic dots,
-// police blips (red, only while the player is wanted), the mission
-// waypoint with a real route line from the road graph, contract markers,
-// and the player's own custom marker (click to place, click the full
-// map to move it). Zoom on the full map follows the mouse wheel; at
-// speed the minimap zooms out on its own.
+// minimap.js - the minimap and the full-screen map, drawn from the same
+// function. North-up, roads + canal + landmarks + cars + the player
+// arrow + the mission waypoint with its RoadGraph route + police blips
+// + contract markers. One draw routine serves both canvases at
+// different scales; the map never shows anything the game does not know.
 
-import { LANDMARKS } from './city.js';
+export class MinimapSys {
+  constructor(w) {
+    this.w = w;
+  }
 
-export function createMinimap(deps) {
-  const { player, vehicles, city } = deps;
-  const minimapCtx = document.getElementById('minimap').getContext('2d');
-  const fullmapCtx = document.getElementById('fullmap').getContext('2d');
-  let lastDraw = 0;
-  let marker = null;
-  let zoom = 1;
-
-  function drawMap(ctx, size, opts = {}) {
-    const s = (size / 1200) * zoom;
-    const toPx = (x, z) => [(x + 600) * s, (z + 600) * s];
-    ctx.fillStyle = '#141a26';
-    ctx.fillRect(0, 0, size, size);
-    // Sea + beach.
-    ctx.fillStyle = '#1d4a66';
-    ctx.fillRect(0, size - 40 * s, size, 40 * s);
-    ctx.fillStyle = '#d8c49a';
-    ctx.fillRect(0, size - 62 * s, size, 22 * s);
+  // data: { waypoint, routePoints, police, contractWp }
+  draw(ctx, w, h, scale, cx, cz, data = {}) {
+    const game = this.w;
+    const px = (x) => w / 2 + (x - cx) * scale;
+    const pz = (z) => h / 2 + (z - cz) * scale;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = '#0e1a24';
+    ctx.fillRect(0, 0, w, h);
+    // Sea on the east, land elsewhere.
+    ctx.fillStyle = '#123a5c';
+    ctx.fillRect(px(125), pz(-640), (640 - 125) * scale, 1280 * scale);
+    ctx.fillStyle = '#1c2b33';
+    ctx.fillRect(px(-640), pz(-640), 765 * scale, 1280 * scale);
     // Roads.
-    ctx.strokeStyle = '#5a5f68';
-    ctx.lineWidth = Math.max(1, 10 * s);
-    const seen = new Set();
-    city.nodes.forEach((n, i) => {
-      for (const j of city.adjacency[i]) {
-        const key = i < j ? `${i}-${j}` : `${j}-${i}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const [x1, z1] = toPx(n.x, n.z);
-        const [x2, z2] = toPx(city.nodes[j].x, city.nodes[j].z);
-        ctx.beginPath(); ctx.moveTo(x1, z1); ctx.lineTo(x2, z2); ctx.stroke();
-      }
-    });
+    ctx.strokeStyle = '#4a5560';
+    ctx.lineWidth = Math.max(1, 6 * scale);
+    for (let x = -600; x <= 600; x += 150) {
+      ctx.beginPath(); ctx.moveTo(px(x), pz(-600)); ctx.lineTo(px(x), pz(600)); ctx.stroke();
+    }
+    for (let z = -600; z <= 600; z += 150) {
+      ctx.beginPath(); ctx.moveTo(px(-600), pz(z)); ctx.lineTo(px(600), pz(z)); ctx.stroke();
+    }
+    // Canal.
+    ctx.strokeStyle = '#2a6a9a';
+    ctx.lineWidth = Math.max(2, 14 * scale);
+    ctx.beginPath(); ctx.moveTo(px(150), pz(-600)); ctx.lineTo(px(150), pz(600)); ctx.stroke();
+    // Mission route (RoadGraph polyline, gold).
+    const route = data.routePoints || [];
+    if (route.length > 1) {
+      ctx.strokeStyle = '#f5c542';
+      ctx.lineWidth = Math.max(2, 3 * scale);
+      ctx.beginPath();
+      ctx.moveTo(px(game.player.x), pz(game.player.z));
+      for (const n of route) ctx.lineTo(px(n.x), pz(n.z));
+      ctx.stroke();
+    }
     // Landmarks.
-    const lmColors = { safehouse: '#3fae5a', bar: '#e8a33c', armory: '#d83a2a', chopshop: '#9aa0a8', lighthouse: '#ffd23c', garage: '#3fae5a' };
-    for (const [key, L] of Object.entries(LANDMARKS)) {
-      const [x, z] = toPx(L.x, L.z);
-      ctx.fillStyle = lmColors[key] || '#ffffff';
-      ctx.beginPath(); ctx.arc(x, z, Math.max(2, 4 * s * 2), 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#f5c542';
+    for (const lm of Object.values(game.city.landmarks)) {
+      ctx.beginPath(); ctx.arc(px(lm.x), pz(lm.z), Math.max(2, 5 * scale), 0, Math.PI * 2); ctx.fill();
     }
-    // Mission waypoint + route.
-    const wp = opts.waypoint;
-    if (wp) {
-      const p = player.position();
-      const route = city.route(p.x, p.z, wp.x, wp.z);
-      ctx.strokeStyle = '#e8a33c';
-      ctx.lineWidth = Math.max(1, 3 * s * 2);
+    // Contract waypoint (cyan diamond).
+    if (data.contractWp) {
+      ctx.fillStyle = '#2affd8';
+      const cxp = px(data.contractWp.x), czp = pz(data.contractWp.z);
       ctx.beginPath();
-      let [x, z] = toPx(p.x, p.z);
-      ctx.moveTo(x, z);
-      for (const n of route) { [x, z] = toPx(n.x, n.z); ctx.lineTo(x, z); }
-      ctx.stroke();
-      const [wx, wz] = toPx(wp.x, wp.z);
-      ctx.fillStyle = '#e8a33c';
-      ctx.beginPath(); ctx.arc(wx, wz, Math.max(3, 5 * s * 2), 0, Math.PI * 2); ctx.fill();
+      ctx.moveTo(cxp, czp - 6); ctx.lineTo(cxp + 6, czp);
+      ctx.lineTo(cxp, czp + 6); ctx.lineTo(cxp - 6, czp);
+      ctx.closePath(); ctx.fill();
     }
-    // Contract marker.
-    if (opts.contractWp) {
-      const [x, z] = toPx(opts.contractWp.x, opts.contractWp.z);
-      ctx.fillStyle = '#2ad2ff';
-      ctx.beginPath(); ctx.arc(x, z, Math.max(3, 4 * s * 2), 0, Math.PI * 2); ctx.fill();
-    }
-    // Custom marker + its route.
-    if (marker) {
-      const p = player.position();
-      const route = city.route(p.x, p.z, marker.x, marker.z);
-      ctx.strokeStyle = '#ff5a4a';
-      ctx.lineWidth = Math.max(1, 2 * s * 2);
-      ctx.beginPath();
-      let [x, z] = toPx(p.x, p.z);
-      ctx.moveTo(x, z);
-      for (const n of route) { [x, z] = toPx(n.x, n.z); ctx.lineTo(x, z); }
-      ctx.stroke();
-      const [mx, mz] = toPx(marker.x, marker.z);
-      ctx.strokeStyle = '#ff5a4a';
+    // Mission waypoint (pulsing gold ring).
+    if (data.waypoint) {
+      const wx = px(data.waypoint.x), wz = pz(data.waypoint.z);
+      ctx.strokeStyle = '#f5c542';
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(mx - 6, mz - 6); ctx.lineTo(mx + 6, mz + 6);
-      ctx.moveTo(mx + 6, mz - 6); ctx.lineTo(mx - 6, mz + 6);
-      ctx.stroke();
+      ctx.beginPath(); ctx.arc(wx, wz, 8, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = '#f5c542';
+      ctx.beginPath(); ctx.arc(wx, wz, 3.5, 0, Math.PI * 2); ctx.fill();
     }
-    // Traffic dots.
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    for (const v of vehicles.vehicles) {
-      const [x, z] = toPx(v.x, v.z);
-      ctx.fillRect(x - 1.5, z - 1.5, 3, 3);
-    }
-    // Police blips (only while wanted — the player can't see them otherwise).
-    if (opts.police) {
-      ctx.fillStyle = '#ff3a2a';
-      for (const u of opts.police) {
-        const [x, z] = toPx(u.x, u.z);
-        ctx.beginPath(); ctx.arc(x, z, 3.5, 0, Math.PI * 2); ctx.fill();
+    // Police blips (red, only while wanted).
+    if (data.police) {
+      ctx.fillStyle = '#ff4040';
+      for (const u of data.police) {
+        ctx.beginPath(); ctx.arc(px(u.car.x), pz(u.car.z), 3, 0, Math.PI * 2); ctx.fill();
       }
     }
-    // Player arrow.
-    const p = player.position();
-    const [px, pz] = toPx(p.x, p.z);
+    // Cars (orange dots).
+    ctx.fillStyle = '#ff6a3d';
+    for (const c of game.cars) {
+      if (c.wrecked) continue;
+      ctx.fillRect(px(c.x) - 2, pz(c.z) - 2, 4, 4);
+    }
+    // Player arrow, pointing along the heading.
+    const py = game.player.onFoot ? game.player.heading : (game.player.vehicle ? game.player.vehicle.heading : game.player.heading);
     ctx.save();
-    ctx.translate(px, pz);
-    ctx.rotate(player.state.heading);
-    ctx.fillStyle = '#e8a33c';
+    ctx.translate(px(game.player.x), pz(game.player.z));
+    ctx.rotate(Math.atan2(Math.sin(py), Math.cos(py)));
+    ctx.fillStyle = '#ffffff';
     ctx.beginPath(); ctx.moveTo(0, -7); ctx.lineTo(5, 6); ctx.lineTo(-5, 6); ctx.closePath(); ctx.fill();
     ctx.restore();
   }
-
-  function update(now, opts = {}) {
-    if (now - lastDraw < 150) return;
-    lastDraw = now;
-    // Zoom out a little at speed so the road ahead stays visible.
-    const pv = vehicles.getPlayerVehicle();
-    zoom = pv ? 1 + Math.min(0.4, Math.abs(pv.speed) / pv.def.topSpeed * 0.4) : 1;
-    drawMap(minimapCtx, 220, opts);
-    if (opts.full) drawMap(fullmapCtx, 640, opts);
-  }
-
-  function mapClick(e, size) {
-    const rect = e.target.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * size;
-    const z = ((e.clientY - rect.top) / rect.height) * size;
-    marker = { x: (x / (size / 1200)) - 600, z: (z / (size / 1200)) - 600 };
-  }
-
-  function bind() {
-    const mini = document.getElementById('minimap');
-    const full = document.getElementById('fullmap');
-    if (mini) mini.addEventListener('click', (e) => mapClick(e, 220));
-    if (full) {
-      full.addEventListener('click', (e) => mapClick(e, 640));
-      full.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        zoom = Math.max(0.6, Math.min(2.2, zoom + (e.deltaY < 0 ? 0.15 : -0.15)));
-      }, { passive: false });
-    }
-  }
-
-  return {
-    update,
-    bind,
-    get marker() { return marker; },
-    set marker(m) { marker = m; },
-    drawMap,
-  };
 }

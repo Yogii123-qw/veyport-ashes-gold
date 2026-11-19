@@ -1,17 +1,15 @@
-// save.js — real progress, honestly stored (SPEC §3.6).
-//
-// Three slots in localStorage plus autosave at mission checkpoints and
-// on safehouse entry (the "Menyimpan…" indicator only ever appears when
-// a write actually happens). Export/import is a JSON file with a
-// FNV-1a checksum: a corrupt file is refused with a clear message, never
-// a crash, and never silently wipes the player's slot. Schema is
-// versioned (`saveVersion: 1`); unknown versions are refused, old
-// versions migrate through explicit per-version functions.
+// save.js - real save/load for Veyport.
+// Three localStorage slots plus an autosave slot, JSON export/import with
+// schema validation and an FNV-1a checksum. A corrupt slot is reported,
+// never silently deleted, and never crashes the game.
 
 export const SAVE_VERSION = 1;
-const SLOT_KEY = (i) => `veyport-save-slot${i}`;
+const SLOT_KEY = (n) => `veyport-r4-save-slot${n}`;
+const AUTO_KEY = 'veyport-r4-autosave';
 
-export function fnv1a(str) {
+// FNV-1a 32-bit, hex string. Small, deterministic, good enough to catch
+// a hand-edited or truncated save file.
+export function checksum(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
@@ -20,202 +18,149 @@ export function fnv1a(str) {
   return h.toString(16).padStart(8, '0');
 }
 
-function checksumOf(payload) {
-  return fnv1a(JSON.stringify(payload));
+function isNum(v) {
+  return typeof v === 'number' && Number.isFinite(v);
 }
 
-export function createSave(deps) {
-  const { player, vehicles, economy, weather, missions, contracts, wanted } = deps;
-  const settings = () => (deps.getSettings ? deps.getSettings() : {});
+// The full save schema (version 1). collect() reads live objects,
+// apply() writes them back. Nothing here invents state: every field
+// comes from a system that owns it.
+export class SaveSys {
+  constructor() {
+    this.lastError = '';
+  }
 
-  function collect() {
-    const ps = player.state;
-    const pv = vehicles.getPlayerVehicle();
-    return {
+  collect(w) {
+    const p = w.player;
+    const data = {
       saveVersion: SAVE_VERSION,
-      savedAt: new Date().toISOString(),
+      savedAt: Date.now(),
       player: {
-        x: ps.x, z: ps.z, heading: ps.heading,
-        health: ps.health, armor: ps.armor,
-        currentWeapon: ps.currentWeapon,
-        weapons: Object.fromEntries(Object.entries(ps.weapons).map(([k, w]) => [k, { owned: w.owned, ammo: w.ammo, reserve: w.reserve }])),
+        x: p.x, z: p.z, heading: p.heading,
+        hp: p.hp, armor: p.armor,
+        weapon: p.weapon,
+        owned: JSON.parse(JSON.stringify(p.owned)),
       },
-      vehicle: pv ? {
-        type: pv.type, x: pv.x, z: pv.z, heading: pv.heading,
-        integrity: pv.integrity, color: pv.color,
-      } : null,
-      economy: {
-        cash: economy.cash,
-        ledger: economy.ledger.slice(0, 50),
-        garage: economy.garage.slice(),
-        freeResprays: economy.state.freeResprays || 0,
-      },
-      missions: {
-        completed: missions.state.completed.slice(),
-        choices: { ...missions.state.choices },
-        storyComplete: missions.state.storyComplete,
-        ending: missions.state.ending,
-      },
-      contracts: {
-        reputation: contracts.state.reputation,
-        done: contracts.state.done,
-        failed: contracts.state.failed,
-        cachesFound: contracts.state.cachesFound.slice(),
-        stuntBest: { ...contracts.state.stuntBest },
-        trialBest: { ...contracts.state.trialBest },
-      },
-      wanted: { stars: wanted.stars, heat: wanted.heat },
-      world: {
-        dayTime: weather.dayTime,
-        weather: weather.weather,
-      },
-      settings: settings(),
+      money: w.economy.balance,
+      ledger: w.economy.ledger.slice(-20),
+      missions: w.missions ? w.missions.saveState() : { completed: [], active: null, stage: 0, flags: {} },
+      contracts: w.contracts ? w.contracts.saveState() : { done: 0, rep: 50 },
+      wanted: w.wanted ? { heat: w.wanted.heat, stars: w.wanted.stars } : { heat: 0, stars: 0 },
+      clock: w.weather.clock,
+      weather: w.weather.state,
+      stats: w.stats || { playSeconds: 0, distanceM: 0, carsStolen: 0, shots: 0, hits: 0, missionsFailed: 0 },
+      settings: w.settings || { lang: 'id', master: 0.8, music: 0.5, sfx: 0.8 },
     };
+    const body = JSON.stringify(data);
+    return { ...data, checksum: checksum(body) };
   }
 
-  function apply(data) {
-    const ps = player.state;
-    ps.x = data.player.x;
-    ps.z = data.player.z;
-    ps.heading = data.player.heading;
-    ps.health = data.player.health;
-    ps.armor = data.player.armor;
-    ps.currentWeapon = data.player.currentWeapon;
-    for (const [id, w] of Object.entries(data.player.weapons)) {
-      if (ps.weapons[id]) {
-        ps.weapons[id].owned = w.owned;
-        ps.weapons[id].ammo = w.ammo;
-        ps.weapons[id].reserve = w.reserve;
-      } else {
-        ps.weapons[id] = { owned: w.owned, ammo: w.ammo, reserve: w.reserve, mag: 0 };
-      }
-    }
-    player.syncWeaponMesh();
-    player.teleport(data.player.x, data.player.z, data.player.heading);
-    if (data.vehicle) {
-      const v = vehicles.makeVehicle(data.vehicle.type, data.vehicle.x, data.vehicle.z, data.vehicle.heading, { color: data.vehicle.color });
-      v.integrity = data.vehicle.integrity;
-    }
-    economy.state.cash = data.economy.cash;
-    economy.state.ledger = data.economy.ledger.slice();
-    economy.state.garage = data.economy.garage.slice();
-    economy.state.freeResprays = data.economy.freeResprays || 0;
-    missions.state.completed = data.missions.completed.slice();
-    missions.state.choices = { ...data.missions.choices };
-    missions.state.storyComplete = data.missions.storyComplete;
-    missions.state.ending = data.missions.ending;
-    missions.state.activeIndex = -1;
-    contracts.state.reputation = data.contracts.reputation;
-    contracts.state.done = data.contracts.done;
-    contracts.state.failed = data.contracts.failed;
-    contracts.state.cachesFound = data.contracts.cachesFound.slice();
-    contracts.state.stuntBest = { ...data.contracts.stuntBest };
-    contracts.state.trialBest = { ...data.contracts.trialBest };
-    wanted.setStars(data.wanted.stars);
-    weather.setTime(data.world.dayTime * 24);
-    if (data.world.weather) weather.state.weather = data.world.weather;
-  }
-
-  function migrate(data) {
-    // Version 1 is current; older versions would migrate here, one
-    // explicit function per version. Unknown versions are refused.
-    if (data.saveVersion !== SAVE_VERSION) {
-      return { ok: false, reason: 'unknown-version', version: data.saveVersion };
-    }
-    return { ok: true, data };
-  }
-
-  function validate(raw) {
+  validate(raw) {
     let parsed;
     try {
       parsed = JSON.parse(raw);
-    } catch {
-      return { ok: false, reason: 'bad-json' };
+    } catch (e) {
+      this.lastError = 'File bukan JSON yang valid';
+      return null;
     }
-    if (!parsed || typeof parsed !== 'object' || !parsed.payload || !parsed.checksum) {
-      return { ok: false, reason: 'bad-shape' };
+    if (!parsed || typeof parsed !== 'object') {
+      this.lastError = 'Struktur save tidak dikenal';
+      return null;
     }
-    if (checksumOf(parsed.payload) !== parsed.checksum) {
-      return { ok: false, reason: 'checksum' };
+    if (parsed.saveVersion !== SAVE_VERSION) {
+      this.lastError = `Versi save ${parsed.saveVersion} tidak didukung (game ini versi ${SAVE_VERSION})`;
+      return null;
     }
-    return migrate(parsed.payload);
+    const { checksum: sum, ...rest } = parsed;
+    if (checksum(JSON.stringify(rest)) !== sum) {
+      this.lastError = 'Checksum tidak cocok, file mungkin rusak atau diubah';
+      return null;
+    }
+    if (!parsed.player || !isNum(parsed.player.x) || !isNum(parsed.player.z)) {
+      this.lastError = 'Data pemain hilang atau rusak';
+      return null;
+    }
+    return parsed;
   }
 
-  function wrap(payload) {
-    return JSON.stringify({ payload, checksum: checksumOf(payload) });
+  apply(parsed, w) {
+    const p = w.player;
+    const sp = parsed.player;
+    p.x = sp.x; p.z = sp.z; p.heading = sp.heading;
+    p.hp = Math.max(1, Math.min(100, sp.hp));
+    p.armor = Math.max(0, Math.min(100, sp.armor || 0));
+    p.owned = sp.owned || p.owned;
+    if (sp.weapon && p.owned[sp.weapon]) p.switchWeapon(sp.weapon);
+    p.group.position.set(p.x, 0, p.z);
+    p.group.rotation.y = p.heading;
+    if (typeof parsed.money === 'number') w.economy.balance = parsed.money;
+    if (Array.isArray(parsed.ledger)) w.economy.ledger = parsed.ledger;
+    if (parsed.missions && w.missions) w.missions.loadState(parsed.missions);
+    if (parsed.contracts && w.contracts) w.contracts.loadState(parsed.contracts);
+    if (parsed.wanted && w.wanted) {
+      w.wanted.heat = parsed.wanted.heat || 0;
+      w.wanted.stars = parsed.wanted.stars || 0;
+    }
+    if (isNum(parsed.clock)) w.weather.clock = parsed.clock;
+    if (parsed.weather && w.weather) w.weather.state = parsed.weather;
+    // Merge into the live objects, never replace them: boot.js and the
+    // systems all hold the same stats/settings references, and replacing
+    // the object would silently stop playSeconds from advancing.
+    if (parsed.stats) Object.assign(w.stats, parsed.stats);
+    if (parsed.settings) Object.assign(w.settings, parsed.settings);
   }
 
-  function saveSlot(i) {
-    if (i < 1 || i > 3) return { ok: false, reason: 'bad-slot' };
+  writeSlot(n, w) {
     try {
-      window.localStorage.setItem(SLOT_KEY(i), wrap(collect()));
-    } catch {
-      return { ok: false, reason: 'storage-full' };
+      const data = this.collect(w);
+      localStorage.setItem(SLOT_KEY(n), JSON.stringify(data));
+      return true;
+    } catch (e) {
+      this.lastError = 'Gagal menulis slot: ' + (e.message || e);
+      return false;
     }
-    return { ok: true };
   }
 
-  function loadSlot(i) {
-    if (i < 1 || i > 3) return { ok: false, reason: 'bad-slot' };
-    const raw = window.localStorage.getItem(SLOT_KEY(i));
-    if (!raw) return { ok: false, reason: 'empty' };
-    const v = validate(raw);
-    if (!v.ok) return v;
-    apply(v.data);
-    return { ok: true, savedAt: v.data.savedAt };
+  readSlot(n) {
+    const raw = localStorage.getItem(SLOT_KEY(n));
+    if (!raw) {
+      this.lastError = 'Slot kosong';
+      return null;
+    }
+    return this.validate(raw);
   }
 
-  function slotInfo(i) {
-    const raw = window.localStorage.getItem(SLOT_KEY(i));
-    if (!raw) return { empty: true };
-    const v = validate(raw);
-    if (!v.ok) return { empty: false, corrupt: true, reason: v.reason };
-    return {
-      empty: false,
-      savedAt: v.data.savedAt,
-      cash: v.data.economy.cash,
-      missions: v.data.missions.completed.length,
-      storyComplete: v.data.missions.storyComplete,
-    };
+  autosave(w) {
+    try {
+      const data = this.collect(w);
+      localStorage.setItem(AUTO_KEY, JSON.stringify(data));
+      return true;
+    } catch (e) {
+      this.lastError = 'Autosave gagal: ' + (e.message || e);
+      return false;
+    }
   }
 
-  function deleteSlot(i) {
-    window.localStorage.removeItem(SLOT_KEY(i));
-    return { ok: true };
+  readAutosave() {
+    const raw = localStorage.getItem(AUTO_KEY);
+    if (!raw) return null;
+    return this.validate(raw);
   }
 
-  function exportSave(i) {
-    const raw = window.localStorage.getItem(SLOT_KEY(i));
-    if (!raw) return { ok: false, reason: 'empty' };
-    return { ok: true, json: raw, filename: `veyport-save-slot${i}.json` };
+  // Export: returns the JSON text for a download button to save.
+  exportText(w) {
+    return JSON.stringify(this.collect(w), null, 2);
   }
 
-  function importSave(text) {
-    const v = validate(text);
-    if (!v.ok) return v;
-    apply(v.data);
-    return { ok: true, savedAt: v.data.savedAt };
+  importText(raw) {
+    return this.validate(raw);
   }
 
-  /** Autosave: writes the first slot only when asked, and says so. */
-  function autosave() {
-    const r = saveSlot(1);
-    if (r.ok && deps.onAutosave) deps.onAutosave();
-    return r;
+  hasSlot(n) {
+    return localStorage.getItem(SLOT_KEY(n)) !== null;
   }
 
-  return {
-    collect,
-    apply,
-    saveSlot,
-    loadSlot,
-    slotInfo,
-    deleteSlot,
-    exportSave,
-    importSave,
-    autosave,
-    validate,
-    wrap,
-    get version() { return SAVE_VERSION; },
-  };
+  hasAutosave() {
+    return localStorage.getItem(AUTO_KEY) !== null;
+  }
 }

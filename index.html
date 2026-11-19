@@ -3,216 +3,123 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>VEYPORT: Ashes &amp; Gold</title>
+<title>Veyport: Ashes and Gold</title>
 <link rel="stylesheet" href="./styles.css">
 </head>
 <body>
-<canvas id="game" aria-label="Veyport: Ashes and Gold — open-world action game"></canvas>
-<p id="status" role="status" aria-live="polite"></p>
+<canvas id="game" aria-label="Veyport: kota terbuka, kendarai mobil, jalankan misi"></canvas>
 
-<!-- ============ HUD ============ -->
-<div id="hud" class="hidden">
-  <div id="topLeft">
-    <div id="healthRow">
-      <div class="bar" id="hpBar"><div id="hpFill"></div></div>
-      <div class="bar armor" id="armorBar"><div id="armorFill"></div></div>
+<!-- HUD -->
+<div id="hud" style="display:none">
+  <div id="topBar">
+    <div id="topLeft">
+      <div id="hudMoney">$800</div>
+      <div id="hudWeapon">P9 Sidearm 12/48</div>
     </div>
-    <div id="cashRow"><span id="cashLabel">Uang</span> <span id="cash">$500</span></div>
-    <div id="stars" aria-label="Wanted level"></div>
-  </div>
-  <div id="topCenter">
-    <div id="compass"></div>
-    <div id="clockRow"><span id="clock">09:00</span> <span id="weatherLabel">Cerah</span> <span id="district">Dermaga</span></div>
-  </div>
-  <div id="topRight">
-    <button id="btnMap" class="hudBtn" title="Peta (M)">Peta</button>
-    <button id="btnPause" class="hudBtn" title="Jeda (Esc)">II</button>
-  </div>
-  <div id="objective" class="hidden"></div>
-  <div id="weaponBox">
-    <div id="weaponName">P9 Sidearm</div>
-    <div id="ammo">12 / 48</div>
-    <div id="weaponKeys">
-      <button data-weapon="1" class="wKey active">1</button>
-      <button data-weapon="2" class="wKey">2</button>
+    <div id="topCenter">
+      <div id="hudCompass">U</div>
+      <div id="hudClock">06:00 CLEAR</div>
+      <div id="wantedStars"></div>
+    </div>
+    <div id="topRight">
+      <button id="btnMap" class="iconBtn" aria-label="Peta">PETA</button>
+      <button id="btnPause" class="iconBtn" aria-label="Jeda">II</button>
     </div>
   </div>
-  <div id="speedo" class="hidden">
-    <div id="speedKmh">0</div>
-    <div id="speedUnit">km/h</div>
-    <div id="speedBar"><div id="speedFill"></div></div>
-    <div id="carName"></div>
-    <div id="carHealth"><div id="carHealthFill"></div></div>
-  </div>
-  <canvas id="minimap" width="220" height="220"></canvas>
-  <div id="crosshair" class="hidden"><div class="ch-dot"></div></div>
-  <div id="hitmarker" class="hidden">✕</div>
-  <div id="interactPrompt" class="hidden"></div>
-  <div id="notice"></div>
-</div>
-
-<!-- ============ Story dialog (typewriter + choices) ============ -->
-<div id="dialogBox" class="hidden">
-  <canvas id="dialogPortrait" width="96" height="96" aria-hidden="true"></canvas>
-  <div class="dialogMain">
-    <div id="dialogName"></div>
-    <div id="dialogText"></div>
-    <div id="dialogChoices" class="hidden"></div>
-    <button id="dialogSkip" class="dialogSkip">Lewati &rsaquo;</button>
+  <canvas id="minimap" width="150" height="150"></canvas>
+  <div id="hudObjective">Masuk ke mobil Seraph di depan safehouse.</div>
+  <div id="hpBar"><div id="hudHp"></div></div>
+  <div id="hudSpeed">0 km/h</div>
+  <div id="weaponSlots">
+    <button class="wslot" data-weapon="1">P9</button>
+    <button class="wslot" data-weapon="2">KR9</button>
+    <button class="wslot" data-weapon="3">IRN</button>
+    <button class="wslot" data-weapon="4">VK7</button>
+    <button class="wslot" data-weapon="5">TIN</button>
   </div>
 </div>
 
-<!-- ============ Mission result ============ -->
-<div id="missionResult" class="overlay hidden">
-  <div class="panel resultPanel">
-    <h2 id="resultTitle">Misi selesai!</h2>
-    <div id="resultMission"></div>
-    <div id="resultGrade"></div>
-    <div id="resultStats"></div>
-    <div class="panelBtns">
-      <button id="btnResultContinue" class="bigBtn">Lanjutkan</button>
-    </div>
-  </div>
+<!-- Touch controls -->
+<div id="joyZone"><div id="joyBase"><div id="joyKnob"></div></div></div>
+<div id="touchBtns">
+  <button id="btnRun" class="tbtn">LARI</button>
+  <button id="btnBrake" class="tbtn">REM</button>
+  <button id="btnFire" class="tbtn">TEMBAK</button>
+  <button id="btnAction" class="tbtn big"><span id="btnActionLabel">MASUK</span></button>
 </div>
 
-<!-- ============ WASTED / BUSTED ============ -->
-<div id="wastedOverlay" class="overlay wasted hidden">
-  <div class="bigWord">WASTED</div>
-  <div id="wastedBill" class="billLine"></div>
-  <button id="btnWastedContinue" class="bigBtn">Lanjutkan</button>
-</div>
-<div id="bustedOverlay" class="overlay busted hidden">
-  <div class="bigWord">BUSTED</div>
-  <div id="bustedFine" class="billLine"></div>
-  <button id="btnBustedContinue" class="bigBtn">Lanjutkan</button>
-</div>
-
-<!-- ============ Ending ============ -->
-<div id="endingOverlay" class="overlay hidden">
-  <div class="panel resultPanel">
-    <h2 id="endingTitle">ENDING</h2>
-    <div id="endingText"></div>
-    <div class="panelBtns">
-      <button id="btnEndingContinue" class="bigBtn">Jelajahi Veyport</button>
-    </div>
-  </div>
-</div>
-
-<!-- ============ Touch controls ============ -->
-<div id="touchUI" class="hidden">
-  <div id="joy"><div id="joyKnob"></div></div>
-  <div id="touchRight">
-    <button id="btnAim" class="tBtn">BIDIK</button>
-    <button id="btnFire" class="tBtn fire">TEMBAK</button>
-    <button id="btnBrake" class="tBtn">REM</button>
-    <button id="btnRun" class="tBtn run">LARI</button>
-    <button id="btnAction" class="tBtn action">AKSI</button>
-    <button id="btnInteract" class="tBtn">PAKAI</button>
-  </div>
-  <div id="touchTop">
-    <button id="btnMapT" class="tBtn small">PETA</button>
-    <button id="btnPauseT" class="tBtn small">II</button>
-  </div>
-</div>
-
-<!-- ============ Title menu ============ -->
+<!-- Menu -->
 <div id="menu" class="overlay">
-  <div class="menuInner">
+  <div class="panel">
     <h1>VEYPORT</h1>
-    <div class="subtitle">ASHES &amp; GOLD</div>
-    <p class="tagline">Kota pelabuhan. Utang adikmu. Dua sindikat. Satu jalan keluar.</p>
-    <div class="menuBtns">
-      <button id="btnNew" class="bigBtn">Permainan Baru</button>
-      <button id="btnContinue" class="bigBtn" disabled>Lanjutkan</button>
-      <button id="btnSettings" class="bigBtn">Pengaturan</button>
-      <button id="btnCredits" class="bigBtn">Kredit</button>
-    </div>
-    <p class="controls">WASD gerak &middot; Shift lari &middot; E masuk mobil &middot; Klik kiri tembak &middot; Klik kanan bidik &middot; Spasi drift &middot; M peta &middot; Esc jeda</p>
-    <p class="saveNote" id="saveNote"></p>
+    <p class="sub">Ashes and Gold</p>
+    <p class="desc">Kota terbuka di tepi laut. Rook Calloway pulang untuk menagih
+    utang lama. Kendarai, lawan, dan rebut Veyport kembali.</p>
+    <button id="btnStart" class="bigBtn">MULAI</button>
+    <p class="help">Gerak: joystick / WASD &middot; Lari: tahan LARI / Shift &middot;
+    Masuk mobil: AKSI / E &middot; Tembak: TEMBAK &middot; Peta: PETA / M &middot;
+    Jeda: II / Esc</p>
   </div>
 </div>
 
-<!-- ============ Settings ============ -->
-<div id="settings" class="overlay hidden">
+<!-- Pause -->
+<div id="pauseMenu" class="overlay" style="display:none">
   <div class="panel">
-    <h2>Pengaturan</h2>
-    <label>Sensitivitas kamera <span id="sensVal">1.0</span>
-      <input type="range" id="sensitivity" min="0.3" max="2.5" step="0.1" value="1">
-    </label>
-    <label>Kualitas grafis
-      <select id="quality">
-        <option value="high">Tinggi</option>
-        <option value="medium">Sedang</option>
-        <option value="low">Rendah</option>
-      </select>
-    </label>
-    <label>Bahasa teks
-      <select id="lang">
-        <option value="id">Bahasa Indonesia</option>
+    <h2>JEDA</h2>
+    <div class="setRow">
+      <label for="setLang">Bahasa</label>
+      <select id="setLang">
+        <option value="id">Indonesia</option>
         <option value="en">English</option>
       </select>
-    </label>
-    <label><input type="checkbox" id="reduceShake"> Kurangi guncangan layar</label>
-    <div class="panelBtns">
-      <button id="btnSettingsBack" class="bigBtn">Kembali</button>
     </div>
+    <div class="setRow">
+      <label for="setMaster">Volume utama</label>
+      <input id="setMaster" type="range" min="0" max="100" value="80">
+    </div>
+    <div class="setRow">
+      <label for="setMusic">Musik</label>
+      <input id="setMusic" type="range" min="0" max="100" value="50">
+    </div>
+    <button id="btnResume" class="bigBtn">LANJUTKAN</button>
+    <button id="btnQuitToMenu" class="bigBtn ghost">MENU UTAMA</button>
   </div>
 </div>
 
-<!-- ============ Credits ============ -->
-<div id="credits" class="overlay hidden">
+<!-- Map -->
+<div id="mapOverlay" class="overlay" style="display:none">
+  <div class="panel mapPanel">
+    <h2>PETA VEYPORT</h2>
+    <canvas id="bigMap" width="520" height="520"></canvas>
+    <button id="btnCloseMap" class="bigBtn">TUTUP</button>
+  </div>
+</div>
+
+<!-- Busted -->
+<div id="bustedOverlay" class="overlay" style="display:none">
   <div class="panel">
-    <h2>Kredit</h2>
-    <p>VEYPORT: Ashes &amp; Gold — game open-world orisinal.<br>
-    Kota, karakter, kendaraan, dan cerita semuanya fiktif.<br>
-    Dibangun dengan three.js (vendored) + WebAudio sintetis.<br>
-    Tanpa aset unduhan, tanpa jaringan.</p>
-    <div class="panelBtns">
-      <button id="btnCreditsBack" class="bigBtn">Kembali</button>
-    </div>
+    <h2 class="bad">BUSTED</h2>
+    <p class="desc">Polisi menangkapmu. Denda dibayar, kamu bebas lagi.</p>
+    <button id="btnBustedContinue" class="bigBtn">LANJUTKAN</button>
   </div>
 </div>
 
-<!-- ============ Pause ============ -->
-<div id="pauseMenu" class="overlay hidden">
+<!-- Wasted -->
+<div id="wastedOverlay" class="overlay" style="display:none">
   <div class="panel">
-    <h2>Jeda</h2>
-    <div class="menuBtns">
-      <button id="btnResume" class="bigBtn">Lanjutkan</button>
-      <button id="btnLedger" class="bigBtn">Log Keuangan</button>
-      <button id="btnQuitMenu" class="bigBtn">Keluar ke Menu</button>
-    </div>
-    <div id="ledger" class="hidden"></div>
-    <div id="forecast"></div>
-    <h3 class="panelSub">Kontrak</h3>
-    <div id="contractRep"></div>
-    <div id="contractList"></div>
-    <h3 class="panelSub">Penyimpanan</h3>
-    <div id="saveSlots"></div>
-    <label class="importRow">Impor save (JSON)
-      <input type="file" id="importSave" accept=".json,application/json">
-    </label>
+    <h2 class="bad">WASTED</h2>
+    <p class="desc">Rook tumbang. Rumah sakit menambalmu dan mengirim tagihan.</p>
+    <button id="btnWastedContinue" class="bigBtn">LANJUTKAN</button>
   </div>
 </div>
 
-<!-- ============ Shop ============ -->
-<div id="shopMenu" class="overlay hidden">
-  <div class="panel">
-    <h2 id="shopTitle">Toko</h2>
-    <div id="shopCash"></div>
-    <div id="shopList"></div>
-    <div class="panelBtns">
-      <button id="btnCloseShop" class="bigBtn">Tutup</button>
-    </div>
-  </div>
-</div>
-
-<!-- ============ Full map ============ -->
-<div id="mapOverlay" class="overlay hidden">
-  <canvas id="fullmap" width="640" height="640"></canvas>
-  <p class="mapHint">Klik peta untuk menaruh penanda &middot; M / Esc menutup</p>
-</div>
-
-<script type="module" src="./src/main.js"></script>
+<script type="module">
+  // three.min.js is the r160 module build: import it as a module and
+  // publish it on window so the game modules can share one THREE.
+  import * as THREE from './vendor/three.min.js';
+  window.THREE = THREE;
+  const { boot } = await import('./src/boot.js');
+  boot();
+</script>
 </body>
 </html>

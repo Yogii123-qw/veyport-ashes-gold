@@ -1,340 +1,283 @@
-// pedestrians.js — the people of Veyport.
-//
-// Walkers cross the sidewalks, cross at zebras, and run when they hear
-// gunfire. A witness who watches a crime phones the police after five
-// seconds — leave the area before the call completes and the heat never
-// lands (SPEC §3.2). Gang members hold territory: Harbormen in the Docks,
-// Foundry Kings in Foundry Row. They fight back when shot at or when a
-// mission puts them in the player's way. Nobody here is decoration:
-// every ped walks a real route, reacts to real events, and can be hurt.
+// pedestrians.js - Veyport's people: civilians and armed hostiles.
+// Civilians walk the sidewalks, flee gunfire, and phone the police when
+// they witness a crime (5 s call, cancelled if you leave the area).
+// Hostiles (mission guards, gang members) stand their ground and shoot.
+// Every pedestrian is ONE merged mesh (draw-call budget), animated by a
+// walk bob, not by separate limbs.
 
-import * as THREE from '../vendor/three.min.js';
-import { box, mergeGeoms, stdMaterial } from './geo.js';
+import { mergeBoxes, groupAt } from './geo.js';
 
-const WALKER_COUNT = 26;
-const WALKER_SPEED = 1.4;
-const FLEE_SPEED = 4.2;
-const GANG_COLORS = {
-  harbormen: { jacket: 0x2a4a6a, pants: 0x222222, skin: 0xc89878 },
-  foundry: { jacket: 0x6a2a2a, pants: 0x2a2a2a, skin: 0xb88a68 },
-};
-const CIVILIAN_PALETTES = [
-  { jacket: 0x5a6a3a, pants: 0x2a2d33, skin: 0xc89878 },
-  { jacket: 0x8a5a2a, pants: 0x3a3f4a, skin: 0x8a5a3a },
-  { jacket: 0x3a5a7a, pants: 0x222222, skin: 0xd8a888 },
-  { jacket: 0x6a3a5a, pants: 0x2a2d33, skin: 0xc89878 },
-  { jacket: 0x2a7a5a, pants: 0x4a4a48, skin: 0xa87a58 },
-];
+const THREE = window.THREE;
+const MAX_CIVILIANS = 16;
+const SHIRTS = [0xc03028, 0x2a5a8a, 0x2a7a3a, 0xd8b030, 0x7a4a8a, 0xd8d8d8, 0x222222, 0xc06030];
+const SKINS = [0xc89878, 0x8a5a3a, 0xe8b898, 0x6a4a2a];
+const PANTS = [0x2a2a3a, 0x3a3a3a, 0x4a3a2a, 0x2a3a4a];
 
-/** One low-poly person. Armed peds carry a visible gun in the hand. */
-export function buildPersonMesh(opts = {}) {
-  const c = opts.colors || CIVILIAN_PALETTES[0];
+function pedMesh(shirt, skin, pants, hostile) {
   const parts = [
-    box(0.5, 0.62, 0.3, c.jacket, 0, 1.08, 0),
-    box(0.3, 0.3, 0.28, c.skin, 0, 1.58, 0),
-    box(0.32, 0.09, 0.3, 0x1a1a1a, 0, 1.74, 0),
-    box(0.17, 0.55, 0.17, c.jacket, 0.32, 1.08, 0),
-    box(0.17, 0.55, 0.17, c.jacket, -0.32, 1.08, 0),
-    box(0.18, 0.55, 0.18, c.pants, -0.14, 0.38, 0),
-    box(0.18, 0.55, 0.18, c.pants, 0.14, 0.38, 0),
+    { w: 0.5, h: 0.6, d: 0.28, x: 0, y: 1.1, z: 0, color: shirt },
+    { w: 0.3, h: 0.3, d: 0.3, x: 0, y: 1.58, z: 0, color: skin },
+    { w: 0.2, h: 0.75, d: 0.22, x: -0.13, y: 0.38, z: 0, color: pants },
+    { w: 0.2, h: 0.75, d: 0.22, x: 0.13, y: 0.38, z: 0, color: pants },
+    { w: 0.14, h: 0.55, d: 0.16, x: -0.33, y: 1.12, z: 0, color: shirt },
+    { w: 0.14, h: 0.55, d: 0.16, x: 0.33, y: 1.12, z: 0, color: shirt },
   ];
-  const group = new THREE.Group();
-  const body = new THREE.Mesh(mergeGeoms(parts), stdMaterial());
-  body.castShadow = true;
-  group.add(body);
-  if (opts.armed) {
-    const gun = new THREE.Mesh(
-      mergeGeoms([
-        box(0.3, 0.07, 0.05, 0x1c1c20, 0.1, 0, 0),
-        box(0.08, 0.14, 0.05, 0x6a4a2a, 0, -0.09, 0),
-      ]),
-      stdMaterial({ roughness: 0.4, metalness: 0.5 }),
-    );
-    gun.position.set(-0.32, 0.82, 0.12);
-    group.add(gun);
+  if (hostile) {
+    parts.push({ w: 0.08, h: 0.1, d: 0.45, x: 0.33, y: 1.15, z: 0.25, color: 0x1a1a1a });
   }
-  return group;
+  const mesh = mergeBoxes(parts);
+  mesh.castShadow = true;
+  return mesh;
 }
 
-function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a |= 0; a = (a + 0x6d2b79f5) | 0;
-    let t = Math.imul(a ^ (a >>> 15), 1 | a);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
 }
 
-export function createPedestrians(scene, city, bus, deps = {}) {
-  const rng = mulberry32(99173);
-  const group = new THREE.Group();
-  group.name = 'pedestrians';
-  scene.add(group);
-  const peds = [];
-  let pedId = 1;
-  const damagePlayer = deps.damagePlayer || (() => {});
+export class PedSys {
+  constructor(w) {
+    this.w = w;
+    this.peds = [];
+    this.spawnTimer = 0;
+  }
 
-  function makePed(kind, x, z, opts = {}) {
-    const colors = opts.gang ? GANG_COLORS[opts.gang] : CIVILIAN_PALETTES[Math.floor(rng() * CIVILIAN_PALETTES.length)];
-    const mesh = buildPersonMesh({ colors, armed: !!opts.armed });
-    mesh.position.set(x, 0, z);
-    group.add(mesh);
-    const p = {
-      id: pedId++,
-      kind, // 'walker' | 'gang'
-      gang: opts.gang || null,
-      x, z,
-      heading: rng() * Math.PI * 2,
-      speed: 0,
-      health: opts.health || 100,
-      alive: true,
-      armed: !!opts.armed,
-      hostile: !!opts.hostile,
-      state: 'walk',
-      mesh,
-      route: null,
-      routeIdx: 0,
-      walkPhase: rng() * 6,
-      witnessTimer: -1,
-      witnessPos: null,
-      shootCooldown: 0,
-      deadTimer: 0,
-      despawn: 0,
+  get count() {
+    return this.peds.length;
+  }
+
+  // A civilian near (x, z), walking a sidewalk lane.
+  spawnCivilian(x, z) {
+    const mesh = pedMesh(pick(SHIRTS), pick(SKINS), pick(PANTS), false);
+    const g = groupAt(x, 0, z);
+    g.add(mesh);
+    this.w.scene.add(g);
+    const ped = {
+      kind: 'ped', x, z, heading: Math.random() * Math.PI * 2,
+      speed: 1.1 + Math.random() * 0.7, state: 'walk',
+      hp: 100, alive: true, radius: 0.6, armed: false, hostile: false,
+      mesh: g, walkPhase: Math.random() * 6, fleeTimer: 0,
+      witnessTimer: 0, witnessCrime: null, lane: this._pickLane(x, z),
+      onHit: null,
+      onDie: (t) => this._onCivilianDeath(t),
     };
-    peds.push(p);
-    return p;
+    this.w.combat.register(ped);
+    this.peds.push(ped);
+    return ped;
   }
 
-  function assignWalkRoute(p) {
-    const dest = city.randomRoadPoint(rng);
-    p.route = city.route(p.x, p.z, dest.x, dest.z);
-    p.routeIdx = 0;
-  }
-
-  function spawnWalkers() {
-    for (let i = 0; i < WALKER_COUNT; i++) {
-      const pt = city.randomRoadPoint(rng);
-      const p = makePed('walker', pt.x, pt.z);
-      assignWalkRoute(p);
-    }
-  }
-
-  /** A spawn point on open ground: inside a building a ped is
-   * unhittable (the wall blocks every shot while the ped inside can
-   * still shoot out, chance-based) and the defeat stage soft-locks.
-   * M3's guards spawned inside the chop shop and M6's inside the
-   * lighthouse — both defeat stages could never complete. Walk a ring
-   * of candidates out to 24 m and take the first point outside every
-   * collider (low curbs under 1 m don't count, same as resolveCircle).
-   * The guards end up in the forecourt, visible and hittable. */
-  function clearSpawn(x, z) {
-    const inside = (px, pz) => {
-      for (const b of city.colliders) {
-        if (b.height < 1) continue;
-        if (px >= b.x0 - 0.6 && px <= b.x1 + 0.6 && pz >= b.z0 - 0.6 && pz <= b.z1 + 0.6) return true;
-      }
-      return false;
+  // An armed hostile at (x, z): a mission guard or gang member.
+  spawnHostile(x, z, hp = 100, name = 'guard') {
+    const mesh = pedMesh(0x1a1a1a, pick(SKINS), 0x2a2a2a, true);
+    const g = groupAt(x, 0, z);
+    g.add(mesh);
+    this.w.scene.add(g);
+    const ped = {
+      kind: 'hostile', name, x, z, heading: Math.random() * Math.PI * 2,
+      speed: 3.0, state: 'fight',
+      hp, alive: true, radius: 0.6, armed: true, hostile: true,
+      mesh: g, walkPhase: Math.random() * 6, fleeTimer: 0,
+      witnessTimer: 0, witnessCrime: null, lane: null,
+      shootTimer: 0.8 + Math.random(),
+      onHit: null,
+      onDie: (t) => this._onHostileDeath(t),
     };
-    if (!inside(x, z)) return { x, z };
-    for (const r of [4, 8, 12, 16, 20, 24]) {
-      for (let a = 0; a < 8; a++) {
-        const ang = (a / 8) * Math.PI * 2;
-        const px = x + Math.cos(ang) * r;
-        const pz = z + Math.sin(ang) * r;
-        if (!inside(px, pz)) return { x: px, z: pz };
+    this.w.combat.register(ped);
+    this.peds.push(ped);
+    return ped;
+  }
+
+  // A sidewalk lane: an avenue (multiple of 150) offset by 9 m, walking
+  // along it. Lanes never cross buildings.
+  _pickLane(x, z) {
+    const avenue = (v) => Math.round(v / 150) * 150;
+    const alongX = Math.random() < 0.5;
+    if (alongX) {
+      const zLane = avenue(z) + (Math.random() < 0.5 ? 9 : -9);
+      return { axis: 'x', fixed: zLane, dir: Math.random() < 0.5 ? 1 : -1 };
+    }
+    const xLane = avenue(x) + (Math.random() < 0.5 ? 9 : -9);
+    return { axis: 'z', fixed: xLane, dir: Math.random() < 0.5 ? 1 : -1 };
+  }
+
+  remove(ped) {
+    this.w.combat.unregister(ped);
+    this.w.scene.remove(ped.mesh);
+    const i = this.peds.indexOf(ped);
+    if (i >= 0) this.peds.splice(i, 1);
+  }
+
+  _onCivilianDeath(t) {
+    t.state = 'down';
+    t.mesh.rotation.x = -Math.PI / 2;
+    t.mesh.position.y = 0.25;
+    this.w.combat.unregister(t);
+    if (this.w.wanted) this.w.wanted.addHeat(15, 'kill-ped');
+    setTimeout(() => this.remove(t), 15000);
+  }
+
+  _onHostileDeath(t) {
+    t.state = 'down';
+    t.mesh.rotation.x = -Math.PI / 2;
+    t.mesh.position.y = 0.25;
+    this.w.combat.unregister(t);
+    if (this.w.wanted) this.w.wanted.addHeat(6, 'kill-hostile');
+    setTimeout(() => this.remove(t), 15000);
+  }
+
+  // Gunfire / explosions nearby: civilians run, hostiles do not.
+  onGunshot(x, z, radius = 55) {
+    for (const p of this.peds) {
+      if (!p.alive || p.hostile) continue;
+      const d = Math.hypot(p.x - x, p.z - z);
+      if (d < radius && p.state === 'walk') {
+        p.state = 'flee';
+        p.fleeTimer = 4;
+        p.heading = Math.atan2(p.x - x, p.z - z);
       }
     }
-    return { x, z };
   }
 
-  /** Spawn armed gang members at a spot (missions + territory defence). */
-  function spawnGang(gang, x, z, count, opts = {}) {
-    const out = [];
-    for (let i = 0; i < count; i++) {
-      const spot = clearSpawn(x + (rng() - 0.5) * 6, z + (rng() - 0.5) * 6);
-      const p = makePed('gang', spot.x, spot.z, {
-        gang, armed: true, hostile: opts.hostile !== false, health: opts.health || 100,
-      });
-      p.state = opts.hostile === false ? 'walk' : 'fight';
-      out.push(p);
+  // A crime at (x, z): the nearest civilian who sees it starts phoning.
+  onCrime(x, z, heatValue, kind) {
+    let best = null, bestD = 40;
+    for (const p of this.peds) {
+      if (!p.alive || p.hostile || p.state !== 'walk') continue;
+      const d = Math.hypot(p.x - x, p.z - z);
+      if (d < bestD) { bestD = d; best = p; }
     }
-    return out;
+    if (!best) return false;
+    best.state = 'phone';
+    best.witnessTimer = 5;
+    best.witnessCrime = { heat: heatValue, kind };
+    return true;
   }
 
-  function nearestPed(x, z, maxDist, aliveOnly = true) {
-    let best = null;
-    let bestD = maxDist * maxDist;
-    for (const p of peds) {
-      if (aliveOnly && !p.alive) continue;
-      const dx = p.x - x;
-      const dz = p.z - z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 < bestD) { bestD = d2; best = p; }
+  nearest(x, z, radius) {
+    let best = null, bestD = radius;
+    for (const p of this.peds) {
+      if (!p.alive) continue;
+      const d = Math.hypot(p.x - x, p.z - z);
+      if (d < bestD) { bestD = d; best = p; }
     }
     return best;
   }
 
-  function damage(p, amount, opts = {}) {
-    if (!p.alive) return;
-    p.health -= amount;
-    if (opts.head) bus.emit('headshot', { ped: p });
-    if (p.health <= 0) {
-      p.health = 0;
-      p.alive = false;
-      p.state = 'dead';
-      p.deadTimer = 12;
-      // Fall flat: no gore, just a body on the ground.
-      p.mesh.rotation.x = -Math.PI / 2;
-      p.mesh.position.y = 0.25;
-      bus.emit('ped-down', { ped: p, weapon: opts.weapon || null, head: !!opts.head });
-    } else if (p.kind === 'gang') {
-      p.hostile = true;
-      p.state = 'fight';
-    } else {
-      p.state = 'flee';
+  update(dt) {
+    const w = this.w;
+    const px = w.player.x, pz = w.player.z;
+    // Maintain the civilian population near the player.
+    this.spawnTimer -= dt;
+    const civilians = this.peds.filter((p) => !p.hostile && p.alive).length;
+    if (this.spawnTimer <= 0 && civilians < MAX_CIVILIANS) {
+      this.spawnTimer = 0.8;
+      const a = Math.random() * Math.PI * 2;
+      const r = 60 + Math.random() * 70;
+      const x = Math.max(-600, Math.min(600, px + Math.cos(a) * r));
+      const z = Math.max(-600, Math.min(600, pz + Math.sin(a) * r));
+      this.spawnCivilian(x, z);
     }
-  }
-
-  // ---------- Reactions to the event bus ----------
-  function scareAt(x, z, radius) {
-    for (const p of peds) {
-      if (!p.alive || p.kind === 'gang') continue;
-      const d = Math.hypot(p.x - x, p.z - z);
-      if (d < radius) {
-        p.state = 'flee';
-        // A fleeing witness who saw the crime starts the 5-second call.
-        if (p.witnessTimer < 0 && d < 26) {
-          p.witnessTimer = 5;
-          p.witnessPos = { x, z };
+    for (let i = this.peds.length - 1; i >= 0; i--) {
+      const p = this.peds[i];
+      if (!p.alive) continue;
+      // Despawn far civilians (never hostiles: missions own them).
+      if (!p.hostile) {
+        const d = Math.hypot(p.x - px, p.z - pz);
+        if (d > 180) {
+          this.remove(p);
+          continue;
         }
       }
-    }
-  }
-  bus.on('shot', ({ muzzle }) => { if (muzzle) scareAt(muzzle.x, muzzle.z, 30); });
-  bus.on('crash', ({ x, z }) => { if (x !== undefined) scareAt(x, z, 18); });
-  bus.on('vehicle-destroyed', ({ vehicle }) => { if (vehicle) scareAt(vehicle.x, vehicle.z, 35); });
-  bus.on('kill', () => { /* witnesses are already scared by the shot */ });
-
-  function update(dt, ctx) {
-    const px = ctx.playerPos.x;
-    const pz = ctx.playerPos.z;
-    for (let i = peds.length - 1; i >= 0; i--) {
-      const p = peds[i];
-      if (!p.alive) {
-        p.deadTimer -= dt;
-        if (p.deadTimer <= 0) {
-          group.remove(p.mesh);
-          peds.splice(i, 1);
+      if (p.state === 'phone') {
+        p.witnessTimer -= dt;
+        const playerFar = Math.hypot(p.x - px, p.z - pz) > 60;
+        if (playerFar) {
+          p.state = 'walk';
+          p.witnessTimer = 0;
+          p.witnessCrime = null;
+        } else if (p.witnessTimer <= 0) {
+          const crime = p.witnessCrime;
+          p.state = 'walk';
+          p.witnessCrime = null;
+          if (crime && w.wanted) {
+            w.wanted.addHeat(crime.heat, 'witness');
+            if (w.ui) w.ui.notify(w.lang.t('witnessCall'), 'warn');
+          }
         }
         continue;
       }
-      // Witness call: 5 seconds, cancelled if the player gets far away.
-      if (p.witnessTimer > 0) {
-        p.witnessTimer -= dt;
-        const d = Math.hypot(p.x - px, p.z - pz);
-        if (d > 45) {
-          p.witnessTimer = -1; // escaped before the call went through
-        } else if (p.witnessTimer <= 0) {
-          p.witnessTimer = -1;
-          bus.emit('witness', { x: p.witnessPos.x, z: p.witnessPos.z, ped: p });
-        }
-      }
-
       if (p.state === 'flee') {
-        // Run directly away from the player, dodging buildings.
-        const dx = p.x - px;
-        const dz = p.z - pz;
-        const d = Math.hypot(dx, dz) || 1;
-        const nx = p.x + (dx / d) * FLEE_SPEED * dt;
-        const nz = p.z + (dz / d) * FLEE_SPEED * dt;
-        const res = city.resolveCircle(nx, nz, 0.5);
-        p.x = res.x; p.z = res.z;
-        p.heading = Math.atan2(dx, dz);
-        p.speed = FLEE_SPEED;
-        p.walkPhase += dt * 9;
-        if (d > 55) {
+        p.fleeTimer -= dt;
+        if (p.fleeTimer <= 0) {
           p.state = 'walk';
-          assignWalkRoute(p);
+          p.lane = this._pickLane(p.x, p.z);
         }
-      } else if (p.state === 'fight') {
-        // Hostile: close to 14 m, then shoot with real inaccuracy.
-        const dx = px - p.x;
-        const dz = pz - p.z;
-        const d = Math.hypot(dx, dz);
-        p.heading = Math.atan2(dx, dz);
-        if (d > 14) {
-          const nx = p.x + (dx / d) * 3.4 * dt;
-          const nz = p.z + (dz / d) * 3.4 * dt;
-          const res = city.resolveCircle(nx, nz, 0.5);
-          p.x = res.x; p.z = res.z;
-          p.speed = 3.4;
-          p.walkPhase += dt * 7;
+      }
+      if (p.state === 'fight') {
+        this._fightStep(p, dt);
+        continue;
+      }
+      // 'run' is owned by the mission system (the M5 traitor): its
+      // position is set by missions.js, not by the walk logic.
+      if (p.state === 'run') continue;
+      // Walk the lane; at an intersection, sometimes turn onto a new lane.
+      const speed = p.state === 'flee' ? 7 : p.speed;
+      if (p.lane) {
+        if (p.lane.axis === 'x') {
+          p.z += (p.lane.fixed - p.z) * Math.min(1, dt * 3);
+          p.x += p.lane.dir * speed * dt;
+          p.heading = p.lane.dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+          if (Math.abs(p.x % 150) < 2 && Math.random() < 0.004) p.lane = this._pickLane(p.x, p.z);
         } else {
-          p.speed = 0;
-          p.shootCooldown -= dt;
-          if (p.shootCooldown <= 0) {
-            p.shootCooldown = 0.9 + rng() * 0.7;
-            bus.emit('shot', { weapon: 'p9', muzzle: { x: p.x, y: 1.3, z: p.z }, npc: true });
-            // Inaccuracy grows with distance; point-blank still hurts.
-            if (Math.random() < Math.max(0.12, 0.55 - d * 0.02)) {
-              damagePlayer(6 + Math.floor(rng() * 6), 'gang');
-            }
-          }
+          p.x += (p.lane.fixed - p.x) * Math.min(1, dt * 3);
+          p.z += p.lane.dir * speed * dt;
+          p.heading = p.lane.dir > 0 ? 0 : Math.PI;
+          if (Math.abs(p.z % 150) < 2 && Math.random() < 0.004) p.lane = this._pickLane(p.x, p.z);
         }
-      } else {
-        // Walk the route; pick a new destination at the end.
-        if (!p.route || p.routeIdx >= p.route.length) {
-          if (p.kind === 'walker') assignWalkRoute(p);
-          else { p.speed = 0; }
-        }
-        if (p.route && p.routeIdx < p.route.length) {
-          const t = p.route[p.routeIdx];
-          const dx = t.x - p.x;
-          const dz = t.z - p.z;
-          const d = Math.hypot(dx, dz);
-          if (d < 3) { p.routeIdx += 1; }
-          else {
-            p.heading = Math.atan2(dx, dz);
-            p.speed = WALKER_SPEED;
-            const nx = p.x + (dx / d) * WALKER_SPEED * dt;
-            const nz = p.z + (dz / d) * WALKER_SPEED * dt;
-            const res = city.resolveCircle(nx, nz, 0.5);
-            p.x = res.x; p.z = res.z;
-            p.walkPhase += dt * 3.2;
-          }
+        p.x = Math.max(-610, Math.min(610, p.x));
+        p.z = Math.max(-610, Math.min(610, p.z));
+      }
+      // Run over by the player's car.
+      if (!w.player.onFoot && w.player.vehicle) {
+        const v = w.player.vehicle;
+        if (Math.hypot(p.x - v.x, p.z - v.z) < 1.8 && Math.abs(v.speed) > 3) {
+          p.hp = 0;
+          p.alive = false;
+          p.onDie(p);
+          if (w.wanted) w.wanted.addHeat(10, 'runover');
+          continue;
         }
       }
-
-      // Density follows the hour: busy at 08:00 and 17:00, quiet at 03:00.
-      // (Walkers already spawned stay; respawns refill the street.)
-      p.mesh.position.set(p.x, 0, p.z);
-      if (p.state !== 'dead') p.mesh.rotation.y = p.heading;
-      const swing = Math.sin(p.walkPhase) * Math.min(1, p.speed / WALKER_SPEED) * 0.12;
-      p.mesh.rotation.z = swing;
-    }
-
-    // Refill walkers if the street emptied (deaths, despawns).
-    const walkers = peds.filter((p) => p.kind === 'walker' && p.alive).length;
-    if (walkers < 14 && Math.random() < dt * 0.2) {
-      const pt = city.randomRoadPoint(rng);
-      // Spawn away from the player so nobody pops into view.
-      if (Math.hypot(pt.x - px, pt.z - pz) > 60) {
-        const p = makePed('walker', pt.x, pt.z);
-        assignWalkRoute(p);
-      }
+      // Walk bob.
+      p.walkPhase += dt * (2 + speed * 1.8);
+      p.mesh.position.set(p.x, Math.abs(Math.sin(p.walkPhase)) * 0.06, p.z);
+      p.mesh.rotation.y = p.heading;
     }
   }
 
-  spawnWalkers();
-
-  return {
-    peds,
-    update,
-    damage,
-    nearestPed,
-    spawnGang,
-    makePed,
-    buildPersonMesh,
-  };
+  _fightStep(p, dt) {
+    const w = this.w;
+    const pl = w.player;
+    const tx = pl.onFoot ? pl.x : (pl.vehicle ? pl.vehicle.x : pl.x);
+    const tz = pl.onFoot ? pl.z : (pl.vehicle ? pl.vehicle.z : pl.z);
+    const dx = tx - p.x, dz = tz - p.z;
+    const d = Math.hypot(dx, dz);
+    // Face the player, close distance if far, hold ground if close.
+    p.heading = Math.atan2(dx, dz);
+    if (d > 18) {
+      p.x += (dx / d) * p.speed * dt;
+      p.z += (dz / d) * p.speed * dt;
+    } else if (d < 6) {
+      p.x -= (dx / d) * p.speed * 0.5 * dt;
+      p.z -= (dz / d) * p.speed * 0.5 * dt;
+    }
+    p.walkPhase += dt * 6;
+    p.mesh.position.set(p.x, Math.abs(Math.sin(p.walkPhase)) * 0.04, p.z);
+    p.mesh.rotation.y = p.heading;
+    // Shoot on a timer when in range.
+    p.shootTimer -= dt;
+    if (p.shootTimer <= 0 && d < 42) {
+      p.shootTimer = 1.3 + Math.random() * 0.9;
+      if (w.combat) w.combat.npcShoot(p, tx, tz);
+    }
+  }
 }

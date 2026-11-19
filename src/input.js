@@ -1,333 +1,298 @@
-// input.js — keyboard + mouse + touch, one state object, rewritten in phase 2.
-//
-// Every control is per-button state (held / just-pressed), so the game
-// never misses a tap and never double-fires one. Aim and fire are
-// independent buttons: on a phone the player can drag-aim with one thumb
-// and hold fire with the other at the same time (F2's twin requirement:
-// aim + fire together, run + steer together). This rewrite keeps the
-// exact phase-1 API, drives the touch buttons from one binding table
-// instead of six copy-pasted calls, and adds edge-triggered horn and
-// lights actions (H / L) that the audio and headlight code listen for.
-//
-// Desktop (SPEC §5.1): WASD move/drive, Shift run, Space handbrake,
-// E enter/exit, F interact, left click fire, right click aim (hold),
-// R reload, 1-5 weapons, M map, Esc/P pause, H horn, L lights.
-// Touch (SPEC §5.2): left virtual joystick (move + steer), right buttons
-// ACTION / FIRE / BRAKE / RUN (hold-to-run, F2), weapon picker, map,
-// pause. Camera drag happens on empty screen space.
+// input.js - keyboard, mouse and touch input for Veyport.
+// Dead zones are the point: a resting thumb must not steer the car (P6) and
+// a brushing thumb must not spin the camera (P4). Compat mouse events that
+// phones synthesize from touches are blocked twice over (P6).
 
-const KEY_ACTIONS = [
-  ['KeyE', 'enter'],
-  ['KeyR', 'reload'],
-  ['KeyM', 'map'],
-  ['KeyH', 'horn'],
-  ['KeyL', 'lights'],
-];
+export const JOY_DEAD = 0.12;
+export const LOOK_DEAD_PX = 6;
+export const LOOK_MIN_STEP_PX = 3;
+export const LOOK_SENS_TOUCH = 0.007; // rad per px: 60 px drag = ~0.42 rad
+export const LOOK_SENS_MOUSE = 0.0035;
 
-const TOUCH_HOLD = [
-  ['btnRun', 'run'],
-  ['btnFire', 'fire'],
-  ['btnAim', 'aim'],
-  ['btnBrake', 'brake'],
-];
-
-const TOUCH_TAP = [
-  ['btnAction', 'action'],
-  ['btnInteract', 'interact'],
-];
-
-// P4: a resting thumb must not steer the camera. A look-drag only
-// engages after a deliberate flick: the touch must travel at least
-// 6 px from where it landed, in a single move of at least 3 px.
-// Before that, every move is dropped. Once engaged, the whole
-// displacement since touch-down feeds through, so a deliberate 60 px
-// drag still turns ~0.42 rad — exactly as measured before P4.
-const LOOK_DEADZONE_PX = 6;
-const LOOK_MIN_STEP_PX = 3;
-
-// P6: a resting thumb must not steer the car either. A virtual
-// joystick never sits exactly at zero — a thumb parked slightly
-// off-centre reads 0.05–0.2 — and before this fix that raw value fed
-// straight into steering (measured: dx=0.2 turns the Seraph 29 deg/s
-// at 60 km/h, 18 deg/s at 250 km/h, so the car curves forever and the
-// chase camera swings with it). Each axis gets a dead zone with
-// rescale: below 0.12 reads as 0, full deflection still reads 1, so
-// keyboard input (exactly 0 or 1) is untouched and deliberate
-// steering keeps its full range.
-const JOY_DEADZONE = 0.12;
-function deadzone(v) {
+function deadRescale(v, dead) {
   const a = Math.abs(v);
-  if (a < JOY_DEADZONE) return 0;
-  return Math.sign(v) * ((a - JOY_DEADZONE) / (1 - JOY_DEADZONE));
+  if (a < dead) return 0;
+  return Math.sign(v) * ((a - dead) / (1 - dead));
 }
 
-export function createInput() {
-  const keys = new Set();
-  const pressed = new Set(); // edge-triggered: consumed by takeActions()
-  const joy = { active: false, id: -1, x: 0, y: 0, mag: 0, lookId: -1, lastX: 0, lastY: 0, lookEngaged: false, lookStartX: 0, lookStartY: 0 };
-  const touch = { run: false, fire: false, aim: false, brake: false, action: false, interact: false };
-  const look = { dx: 0, dy: 0 }; // accumulated mouse/touch-drag look deltas
-  let mouseDown = false;
-  let mouseAim = false;
-  let pointerLocked = false;
-  let lookScale = 1;
+export class GameInput {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.keys = new Set();
+    this.isTouch = false;
+    // Joystick (left thumb).
+    this.joy = { active: false, id: -1, x: 0, y: 0 };
+    // Look drag (right thumb / mouse drag on empty screen).
+    this.look = { active: false, id: -1, startX: 0, startY: 0, lastX: 0, lastY: 0, engaged: false, dx: 0, dy: 0 };
+    this.mouseLook = { active: false, lastX: 0, lastY: 0 };
+    // Held buttons.
+    this.runHeld = false;
+    this.fireHeld = false;
+    this.brakeHeld = false;
+    this.actionQueued = false;
+    this.pauseQueued = false;
+    this.mapQueued = false;
+    this.reloadQueued = false;
+    this.weaponQueued = null;
+    this._bindKeys();
+    this._bindTouch(canvas);
+    this._bindMouse(canvas);
+    this._bindButtons();
+  }
 
-  window.addEventListener('keydown', (e) => {
-    if (e.repeat) return;
-    keys.add(e.code);
-    pressed.add(e.code);
-    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+  _bindKeys() {
+    window.addEventListener('keydown', (e) => {
+      if (e.repeat) return;
+      this.keys.add(e.code);
+      if (e.code === 'KeyE' || e.code === 'KeyF') this.actionQueued = true;
+      if (e.code === 'KeyR') this.reloadQueued = true;
+      if (e.code === 'KeyM') this.mapQueued = true;
+      if (e.code === 'Escape' || e.code === 'KeyP') this.pauseQueued = true;
+      if (e.code.startsWith('Digit')) {
+        const n = Number(e.code.slice(5));
+        if (n >= 1 && n <= 5) this.weaponQueued = n;
+      }
+      if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+    });
+    window.addEventListener('keyup', (e) => this.keys.delete(e.code));
+    window.addEventListener('blur', () => this.keys.clear());
+  }
+
+  _joyEl() {
+    return document.getElementById('joyKnob');
+  }
+
+  _bindTouch(canvas) {
+    const zone = document.getElementById('joyZone');
+    const onDown = (e) => {
+      this.isTouch = true;
+      document.body.classList.add('touch');
+      for (const t of e.changedTouches) {
+        const r = zone.getBoundingClientRect();
+        if (t.clientX >= r.left && t.clientX <= r.right && t.clientY >= r.top && t.clientY <= r.bottom && !this.joy.active) {
+          this.joy.active = true;
+          this.joy.id = t.identifier;
+          this._joyMove(t, r);
+          e.preventDefault();
+        }
+      }
+    };
+    const onMove = (e) => {
+      for (const t of e.changedTouches) {
+        if (this.joy.active && t.identifier === this.joy.id) {
+          this._joyMove(t, zone.getBoundingClientRect());
+          e.preventDefault();
+        }
+      }
+    };
+    const onUp = (e) => {
+      for (const t of e.changedTouches) {
+        if (this.joy.active && t.identifier === this.joy.id) {
+          this.joy.active = false;
+          this.joy.x = 0; this.joy.y = 0;
+          const knob = this._joyEl();
+          if (knob) knob.style.transform = 'translate(-50%, -50%)';
+        }
+      }
+    };
+    zone.addEventListener('touchstart', onDown, { passive: false });
+    zone.addEventListener('touchmove', onMove, { passive: false });
+    zone.addEventListener('touchend', onUp);
+    zone.addEventListener('touchcancel', onUp);
+
+    // Look drag: touches on the canvas that are NOT on the joystick zone
+    // and NOT on a button. Dead zone + engagement gate (P4).
+    canvas.addEventListener('touchstart', (e) => {
+      this.isTouch = true;
+      document.body.classList.add('touch');
+      for (const t of e.changedTouches) {
+        if (this.look.active) continue;
+        this.look.active = true;
+        this.look.id = t.identifier;
+        this.look.startX = t.clientX; this.look.startY = t.clientY;
+        this.look.lastX = t.clientX; this.look.lastY = t.clientY;
+        this.look.engaged = false;
+      }
+      // Layer 1 of the compat-mouse guard: non-passive + preventDefault
+      // stops the platform synthesizing mouse events from this touch.
       e.preventDefault();
-    }
-  });
-  window.addEventListener('keyup', (e) => keys.delete(e.code));
-  window.addEventListener('blur', () => keys.clear());
-
-  const canvas = document.getElementById('game');
-  // P6: ignore mouse events synthesised from a touch. On a real phone
-  // the browser fires compat mousedown/mousemove after a touchstart
-  // that was not preventDefaulted, and the mousemove handler below
-  // used to feed look.dx from movementX ON TOP of the touch path
-  // (measured: a 60 px drag turned 0.58 rad instead of 0.42). A real
-  // mouse has no firesTouchEvents flag, so desktop play is untouched.
-  const isCompatMouse = (e) => !!(e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents);
-  canvas.addEventListener('mousedown', (e) => {
-    if (isCompatMouse(e)) return;
-    if (e.button === 0) mouseDown = true;
-    if (e.button === 2) mouseAim = true;
-  });
-  window.addEventListener('mouseup', (e) => {
-    if (e.button === 0) mouseDown = false;
-    if (e.button === 2) mouseAim = false;
-  });
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-  canvas.addEventListener('mousemove', (e) => {
-    if (isCompatMouse(e)) return;
-    if (pointerLocked || mouseDown) {
-      look.dx += e.movementX;
-      look.dy += e.movementY;
-    }
-  });
-  canvas.addEventListener('click', () => {
-    // Desktop aim uses pointer lock when the game is running; a click
-    // re-locks after Esc released it. Failure is silent (not an error).
-    if (!pointerLocked && !('ontouchstart' in window)) {
-      canvas.requestPointerLock?.();
-    }
-  });
-  document.addEventListener('pointerlockchange', () => {
-    pointerLocked = document.pointerLockElement === canvas;
-  });
-
-  // ---- Touch buttons, driven by the tables above ----
-  function bindHold(id, name) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    const on = (e) => { e.preventDefault(); touch[name] = true; el.classList.add('held'); };
-    const off = (e) => { e.preventDefault(); touch[name] = false; el.classList.remove('held'); };
-    el.addEventListener('touchstart', on, { passive: false });
-    el.addEventListener('touchend', off);
-    el.addEventListener('touchcancel', off);
-    el.addEventListener('mousedown', on);
-    el.addEventListener('mouseup', off);
-    el.addEventListener('mouseleave', off);
+    }, { passive: false });
+    canvas.addEventListener('touchmove', (e) => {
+      for (const t of e.changedTouches) {
+        if (!this.look.active || t.identifier !== this.look.id) continue;
+        const dx = t.clientX - this.look.lastX;
+        const dy = t.clientY - this.look.lastY;
+        this.look.lastX = t.clientX; this.look.lastY = t.clientY;
+        const fromStart = Math.hypot(t.clientX - this.look.startX, t.clientY - this.look.startY);
+        if (!this.look.engaged) {
+          // Engagement gate: ignore until one step moves >= 3 px AND the
+          // total drift passed the 6 px dead zone.
+          if (fromStart < LOOK_DEAD_PX) continue;
+          if (Math.hypot(dx, dy) < LOOK_MIN_STEP_PX) continue;
+          this.look.engaged = true;
+        }
+        this.look.dx += dx * LOOK_SENS_TOUCH;
+        this.look.dy += dy * LOOK_SENS_TOUCH;
+      }
+      e.preventDefault();
+    }, { passive: false });
+    const lookEnd = (e) => {
+      for (const t of e.changedTouches) {
+        if (this.look.active && t.identifier === this.look.id) {
+          this.look.active = false;
+          this.look.engaged = false;
+        }
+      }
+    };
+    canvas.addEventListener('touchend', lookEnd);
+    canvas.addEventListener('touchcancel', lookEnd);
   }
-  function bindTap(id, name) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener('touchstart', (e) => { e.preventDefault(); touch[name] = true; }, { passive: false });
-    el.addEventListener('click', () => { touch[name] = true; });
-  }
-  for (const [id, name] of TOUCH_HOLD) bindHold(id, name);
-  for (const [id, name] of TOUCH_TAP) bindTap(id, name);
 
-  // ---- Virtual joystick + camera drag ----
-  const joyBase = document.getElementById('joy');
-  const joyKnob = document.getElementById('joyKnob');
-
-  function joyPos(t) {
-    const r = joyBase.getBoundingClientRect();
-    const cx = r.left + r.width / 2;
-    const cy = r.top + r.height / 2;
-    let dx = (t.clientX - cx) / (r.width / 2);
-    let dy = (t.clientY - cy) / (r.height / 2);
+  _joyMove(t, rect) {
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    const radius = rect.width / 2;
+    let dx = (t.clientX - cx) / radius;
+    let dy = (t.clientY - cy) / radius;
     const m = Math.hypot(dx, dy);
     if (m > 1) { dx /= m; dy /= m; }
-    return { dx, dy, mag: Math.min(1, m) };
+    this.joy.x = dx;
+    this.joy.y = dy;
+    const knob = this._joyEl();
+    if (knob) knob.style.transform = `translate(calc(-50% + ${dx * 34}px), calc(-50% + ${dy * 34}px))`;
   }
-  function onTouchStart(e) {
-    for (const t of e.changedTouches) {
-      const el = document.elementFromPoint(t.clientX, t.clientY);
-      if (joyBase && joyBase.contains(el)) {
-        // P6: preventDefault stops the browser synthesising compat
-        // mouse events from this touch (the other half of the fix is
-        // the isCompatMouse guard on the mouse handlers).
-        e.preventDefault();
-        joy.active = true;
-        joy.id = t.identifier;
-        const p = joyPos(t);
-        joy.x = p.dx; joy.y = p.dy; joy.mag = p.mag;
-        joyKnob.style.transform = `translate(${p.dx * 34}px, ${p.dy * 34}px)`;
-      } else if (el === canvas) {
-        // Drag on empty space looks the camera around.
-        e.preventDefault();
-        joy.lookId = t.identifier;
-        joy.lastX = t.clientX;
-        joy.lastY = t.clientY;
-        // P4: the drag starts disengaged — see onTouchMove.
-        joy.lookEngaged = false;
-        joy.lookStartX = t.clientX;
-        joy.lookStartY = t.clientY;
-      }
-      // Touches anywhere else (HUD buttons, dialogs, menus) are left
-      // alone so their tap/click handling keeps working.
-    }
-  }
-  function onTouchMove(e) {
-    for (const t of e.changedTouches) {
-      if (joy.active && t.identifier === joy.id) {
-        const p = joyPos(t);
-        joy.x = p.dx; joy.y = p.dy; joy.mag = p.mag;
-        joyKnob.style.transform = `translate(${p.dx * 34}px, ${p.dy * 34}px)`;
-        e.preventDefault();
-      } else if (t.identifier === joy.lookId) {
-        // P4 dead zone: a resting thumb or slow drift must not steer
-        // the camera. The drag only engages after a deliberate flick
-        // (>= 6 px from touch-down, in a step of >= 3 px); once
-        // engaged, the whole displacement since touch-down feeds
-        // through, so a deliberate 60 px drag still turns ~0.42 rad.
-        const stepX = t.clientX - joy.lastX;
-        const stepY = t.clientY - joy.lastY;
-        let feedX = 0;
-        let feedY = 0;
-        if (joy.lookEngaged) {
-          feedX = stepX;
-          feedY = stepY;
-        } else {
-          const fromStartX = t.clientX - joy.lookStartX;
-          const fromStartY = t.clientY - joy.lookStartY;
-          if (Math.hypot(fromStartX, fromStartY) >= LOOK_DEADZONE_PX
-            && Math.hypot(stepX, stepY) >= LOOK_MIN_STEP_PX) {
-            joy.lookEngaged = true;
-            feedX = fromStartX;
-            feedY = fromStartY;
-          }
-        }
-        look.dx += feedX * 2.2 * lookScale;
-        look.dy += feedY * 2.2 * lookScale;
-        joy.lastX = t.clientX;
-        joy.lastY = t.clientY;
-        e.preventDefault();
-      }
-    }
-  }
-  function onTouchEnd(e) {
-    for (const t of e.changedTouches) {
-      if (t.identifier === joy.id) {
-        joy.active = false; joy.id = -1; joy.x = 0; joy.y = 0; joy.mag = 0;
-        joyKnob.style.transform = 'translate(0px, 0px)';
-      }
-      if (t.identifier === joy.lookId) {
-        joy.lookId = -1;
-        joy.lookEngaged = false;
-      }
-    }
-  }
-  // P6: non-passive so onTouchStart's preventDefault actually runs —
-  // with a passive listener the browser ignores it and keeps firing
-  // compat mouse events for every canvas/joystick touch.
-  document.addEventListener('touchstart', onTouchStart, { passive: false });
-  document.addEventListener('touchmove', onTouchMove, { passive: false });
-  document.addEventListener('touchend', onTouchEnd);
-  document.addEventListener('touchcancel', onTouchEnd);
 
-  // ---- Per-frame state ----
-  function moveVector() {
-    let x = 0;
-    let y = 0;
-    if (keys.has('KeyW') || keys.has('ArrowUp')) y += 1;
-    if (keys.has('KeyS') || keys.has('ArrowDown')) y -= 1;
-    if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
-    if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
-    if (joy.active) {
-      x += joy.x;
-      y -= joy.y; // joystick up = forward
+  _bindMouse(canvas) {
+    canvas.addEventListener('mousedown', (e) => {
+      // Layer 2 of the compat-mouse guard: a mouse event synthesized from
+      // a touch carries firesTouchEvents; never let it steer the camera.
+      if (e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+      this.mouseLook.active = true;
+      this.mouseLook.lastX = e.clientX;
+      this.mouseLook.lastY = e.clientY;
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!this.mouseLook.active) return;
+      if (e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+      this.look.dx += (e.clientX - this.mouseLook.lastX) * LOOK_SENS_MOUSE;
+      this.look.dy += (e.clientY - this.mouseLook.lastY) * LOOK_SENS_MOUSE;
+      this.mouseLook.lastX = e.clientX;
+      this.mouseLook.lastY = e.clientY;
+    });
+    window.addEventListener('mouseup', (e) => {
+      if (e.sourceCapabilities && e.sourceCapabilities.firesTouchEvents) return;
+      this.mouseLook.active = false;
+    });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+
+  _holdButton(id, on, off) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const start = (e) => { e.preventDefault(); on(); };
+    const end = (e) => { e.preventDefault(); off(); };
+    el.addEventListener('touchstart', start, { passive: false });
+    el.addEventListener('touchend', end);
+    el.addEventListener('touchcancel', end);
+    el.addEventListener('mousedown', start);
+    el.addEventListener('mouseup', end);
+    el.addEventListener('mouseleave', off);
+  }
+
+  _bindButtons() {
+    this._holdButton('btnRun', () => { this.runHeld = true; }, () => { this.runHeld = false; });
+    this._holdButton('btnFire', () => { this.fireHeld = true; }, () => { this.fireHeld = false; });
+    this._holdButton('btnBrake', () => { this.brakeHeld = true; }, () => { this.brakeHeld = false; });
+    const tap = (id, fn) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('click', (e) => { e.preventDefault(); fn(); });
+    };
+    tap('btnAction', () => { this.actionQueued = true; });
+    tap('btnMap', () => { this.mapQueued = true; });
+    tap('btnPause', () => { this.pauseQueued = true; });
+    document.querySelectorAll('[data-weapon]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        this.weaponQueued = Number(el.getAttribute('data-weapon'));
+      });
+    });
+  }
+
+  // Movement vector in screen space: x right, y up (joystick up = +y).
+  // Keyboard (WASD/arrows) or joystick, per-axis dead zone + rescale.
+  moveVector() {
+    let x = 0, y = 0;
+    if (this.keys.has('KeyA') || this.keys.has('ArrowLeft')) x -= 1;
+    if (this.keys.has('KeyD') || this.keys.has('ArrowRight')) x += 1;
+    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) y += 1;
+    if (this.keys.has('KeyS') || this.keys.has('ArrowDown')) y -= 1;
+    if (this.joy.active) {
+      x += this.joy.x;
+      y += -this.joy.y; // screen down is +y; up is forward
     }
-    // P6 dead zone (per axis, after the keyboard + joystick sum):
-    // a resting thumb reads 0.05–0.2, which used to creep the player
-    // and steer the car. Full deflection still reads 1, so keyboard
-    // and deliberate full pushes are unchanged.
-    x = deadzone(x);
-    y = deadzone(y);
+    x = deadRescale(Math.max(-1, Math.min(1, x)), JOY_DEAD);
+    y = deadRescale(Math.max(-1, Math.min(1, y)), JOY_DEAD);
     const m = Math.hypot(x, y);
     if (m > 1) { x /= m; y /= m; }
     return { x, y };
   }
 
-  // P6: steering response curve (player only — traffic/police drive
-  // physics directly, never through here). Small inputs near the dead
-  // zone are gentle lane-keeping nudges; full lock is untouched.
-  // dx=0.2 now steers ~4 deg/s at 150 km/h instead of 24.
-  function shapeSteer(s) {
-    const a = Math.abs(s);
-    return Math.sign(s) * a * (0.4 + 0.6 * a);
+  get run() {
+    return this.runHeld || this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
   }
 
-  function driveControls() {
-    // Driving shares the same axes: joystick / WASD steer + throttle.
-    const mv = moveVector();
-    return {
-      throttle: mv.y,
-      steer: shapeSteer(mv.x),
-      handbrake: keys.has('Space') || touch.brake,
-      horn: keys.has('KeyH'),
-      lights: keys.has('KeyL'),
-    };
+  // Driving controls from the same stick: steer (shaped curve so small
+  // inputs are gentle nudges) + throttle/brake. Steer sign: stick right
+  // (mv.x > 0) must turn the car RIGHT on screen. With the chase camera
+  // behind the car, a screen-right turn means heading DECREASES (nose
+  // toward screen right = (-cos h, sin h)), while stepDrive adds
+  // steer to heading, so the input is negated here. Measured before the
+  // fix: holding D swung heading +68.9 deg (a LEFT turn on screen).
+  driveControls() {
+    const mv = this.moveVector();
+    const steer = -Math.sign(mv.x) * Math.pow(Math.abs(mv.x), 1.35);
+    let throttle = 0, brake = 0;
+    if (mv.y > 0) throttle = mv.y;
+    else brake = -mv.y;
+    if (this.keys.has('KeyW') || this.keys.has('ArrowUp')) throttle = 1;
+    if (this.brakeHeld || this.keys.has('Space')) brake = 1;
+    return { steer, throttle, brake, handbrake: this.keys.has('Space') || this.brakeHeld };
   }
 
-  /** Edge-triggered actions, consumed once per call. */
-  function takeActions() {
-    const out = new Set();
-    const take = (code) => {
-      if (pressed.has(code)) { pressed.delete(code); return true; }
-      return false;
-    };
-    for (const [code, name] of KEY_ACTIONS) {
-      if (take(code)) out.add(name);
-    }
-    if (take('KeyF') || touch.interact) { out.add('interact'); touch.interact = false; }
-    if (take('Escape') || take('KeyP')) out.add('pause');
-    if (touch.action) { out.add('enter'); touch.action = false; }
-    for (let i = 1; i <= 5; i++) {
-      if (take(`Digit${i}`)) out.add(`weapon${i}`);
-    }
-    pressed.clear();
+  consumeLook() {
+    const out = { dx: this.look.dx, dy: this.look.dy };
+    this.look.dx = 0; this.look.dy = 0;
     return out;
   }
 
-  return {
-    keys,
-    get moveX() { return moveVector().x; },
-    get moveY() { return moveVector().y; },
-    get sprint() {
-      return keys.has('ShiftLeft') || keys.has('ShiftRight') || touch.run;
-    },
-    get fire() { return mouseDown || touch.fire; },
-    get aim() { return mouseAim || touch.aim; },
-    get handbrake() { return keys.has('Space') || touch.brake; },
-    get horn() { return keys.has('KeyH'); },
-    driveControls,
-    takeActions,
-    /** Consume accumulated look deltas (mouse / touch drag). */
-    takeLook() {
-      const d = { dx: look.dx, dy: look.dy };
-      look.dx = 0;
-      look.dy = 0;
-      return d;
-    },
-    setLookScale(v) { lookScale = Math.max(0.3, Math.min(2.5, v)); },
-    isTouch() {
-      return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
-    },
-  };
+  takeAction() {
+    const v = this.actionQueued;
+    this.actionQueued = false;
+    return v;
+  }
+
+  takePause() {
+    const v = this.pauseQueued;
+    this.pauseQueued = false;
+    return v;
+  }
+
+  takeMap() {
+    const v = this.mapQueued;
+    this.mapQueued = false;
+    return v;
+  }
+
+  takeReload() {
+    const v = this.reloadQueued;
+    this.reloadQueued = false;
+    return v;
+  }
+
+  takeWeapon() {
+    const v = this.weaponQueued;
+    this.weaponQueued = null;
+    return v;
+  }
 }

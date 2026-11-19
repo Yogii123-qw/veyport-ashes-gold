@@ -1,401 +1,275 @@
-// camera.js — the third-person camera (F8 + P7 architecture).
-//
-// P7 architecture (Monch 16:25 WIB — jitter is architectural, not lerp
-// values). The five rules, as built:
-//  1. Update order: the camera updates ONCE per render frame, LAST in the
-//     rAF loop (main.js frame()), after the physics accumulator and
-//     before renderer.render — never inside step(), never once per
-//     physics step.
-//  2. Delta time: the camera's dt is the render frame dt clamped to
-//     0.05 s; every camera interpolation is exponential
-//     1 - Math.exp(-rate * dt). No static lerp factor anywhere on the
-//     camera path (FOV and trauma decay included).
-//  3. Decoupling: the camera reads ONLY a CameraTarget proxy, never raw
-//     physics state and never a vehicle/character mesh. The proxy
-//     smooths XZ (25/s), Y (6/s, separately) and yaw (shortest arc,
-//     20/s); a velocity feed-forward cancels its steady-state trail at
-//     speed, so framing does not drift with velocity.
-//  4. Physics vs render: main.js interpolates the focus between the
-//     previous and current physics states (alpha = accumulator / STEP,
-//     shortest-arc heading) and hands the interpolated focus to the
-//     proxy — the camera never sees a raw stepped state, so 90/120 Hz
-//     renders no longer stair-step. STEP and the physics are untouched.
-//  5. Collision: a 5-ray spherecast (centre + 4 offsets, r = 0.6 m)
-//     replaces the single ray; the camera distance eases toward the hit
-//     (fast in at 12/s so it never clips, slow out at 5/s with a
-//     3-frame clearance hysteresis so it never pops against a grazing
-//     edge), with a 2.0 m minimum distance. The ground clamp stays a
-//     hard floor at 1.25 — it is a rarely-engaged safety net whose value
-//     is continuous, so it cannot pop.
-// Shake (trauma) is gated by main.js: only crashes involving the focus
-// (or near it) shake the camera — distant traffic scraping walls used
-// to shake the player's camera (measured: trauma 0.16-0.25 spikes while
-// just walking).
-//
-// Modes: 'menu' (slow cinematic sweep over the city), 'foot', 'aim',
-// 'drive', 'wasted' (F5 crane shot — wanted.js drives it, the camera
-// move itself lives here). The regression rule from SPEC §2.4 is kept
-// as law: on vehicle entry the camera is BEHIND the car, and walking
-// forward always moves the player AWAY from the camera.
+// camera.js - Veyport chase camera, P7 architecture (Monch's 5 rules).
+// (1) Updated LAST in the frame, once per rendered frame, after physics.
+// (2) dt clamped to 0.05; every interpolation is exponential 1-exp(-rate*dt).
+// (3) A separate CameraTarget proxy (XZ, Y and yaw smoothed apart) - the
+//     camera NEVER reads raw physics state or a vehicle mesh.
+// (4) The renderer draws interpolated state (prev/curr snapshots, alpha),
+//     and the camera reads that interpolated focus.
+// (5) Collision is a 5-ray spherecast with damped distance, hysteresis and
+//     a 2.0 m minimum - no hard snaps. Trauma comes ONLY from the player's
+//     own car (AI traffic scraping walls must never shake the player's view).
 
-import * as THREE from '../vendor/three.min.js';
+const THREE = window.THREE;
 
-const BASE_FOV = 62;
-const MAX_FOV_KICK = 14;
-const CAM_DT_MAX = 0.05; // rule 2: camera dt clamp (exported for main.js)
-const PROXY_RATE_XZ = 25; // proxy position follow rate (/s)
-const PROXY_RATE_Y = 6; // proxy height follow rate (/s, separate)
-const PROXY_RATE_YAW = 20; // proxy yaw follow rate (/s, shortest arc)
-const PROXY_RATE_VEL = 6; // feed-forward velocity smoothing (/s)
-const COLLIDE_IN_RATE = 12; // distance shorten rate (/s)
-const COLLIDE_OUT_RATE = 5; // distance lengthen rate (/s)
-const COLLIDE_CLEAR_FRAMES = 3; // hysteresis: clear frames before lengthening
-const COLLIDE_RADIUS = 0.6; // spherecast radius (m)
-const MIN_CAM_DIST = 2.0; // minimum camera distance (m)
+const DT_CLAMP = 0.05;
+const MIN_DIST = 2.0;
+const GROUND_MIN = 1.25;
 
-export function createCameraRig(camera, city) {
-  const rig = {
-    yaw: 0.6,
-    pitch: 0.32,
-    targetYaw: 0.6,
-    targetPitch: 0.32,
-    distance: 6.5,
-    mode: 'menu',
-    trauma: 0,
-    recoil: 0,
-    dragYaw: 0, // temporary look offset while driving; decays to zero
-    wastedT: 0,
-    wastedHeli: null,
-    wastedStart: new THREE.Vector3(),
-    menuAngle: 0,
-    // P7 rule 3: the CameraTarget proxy. The camera reads ONLY this.
-    proxy: { x: 0, z: 0, y: 0, yaw: 0.6, velX: 0, velZ: 0 },
-    // P7 rule 5: damped collision distance (along the eye->camera ray).
-    smoothDist: 6.6,
-    clearFrames: 0,
-  };
-
-  function aspectFov(aspect, speedFrac) {
-    // Narrow screens (portrait phones) get a wider vertical FOV so the
-    // world stays readable instead of collapsing into a tunnel.
-    let fov = BASE_FOV;
-    if (aspect < 1) fov += Math.min(18, (1 - aspect) * 26);
-    else if (aspect > 1.8) fov -= 4;
-    fov += speedFrac * MAX_FOV_KICK; // F7 speed feedback
-    return fov;
-  }
-
-  function setMode(mode, data = {}) {
-    if (rig.mode === mode) return;
-    rig.mode = mode;
-    if (mode === 'drive') {
-      // Regression rule: the camera snaps BEHIND the vehicle on entry.
-      rig.targetYaw = data.heading ?? rig.yaw;
-      rig.yaw = rig.targetYaw;
-      rig.dragYaw = 0;
-      // The proxy must snap with the camera, or its damped yaw would
-      // drag the camera back off the car's heading on the next frame.
-      rig.proxy.yaw = rig.targetYaw;
-      if (Number.isFinite(data.x) && Number.isFinite(data.z)) {
-        rig.proxy.x = data.x;
-        rig.proxy.z = data.z;
-        rig.proxy.y = data.y ?? 0;
-        rig.proxy.velX = 0;
-        rig.proxy.velZ = 0;
-      }
-    }
-    if (mode === 'wasted') {
-      rig.wastedT = 0;
-      rig.wastedHeli = data.heliPos ?? null;
-      rig.wastedStart.copy(camera.position);
-    }
-    if (mode === 'aim') {
-      rig.targetPitch = 0.14;
-    }
-  }
-
-  function addTrauma(amount) {
-    rig.trauma = Math.min(1, rig.trauma + amount);
-  }
-
-  /** Recoil kick: the camera pitches up briefly on every shot. */
-  function addRecoil(amount) {
-    rig.recoil = Math.min(0.12, rig.recoil + amount);
-  }
-
-  /**
-   * P7 rule 3 — move the CameraTarget proxy toward the (render-
-   * interpolated) focus. Called once per render frame, before update().
-   * The focus is already smooth (interpolated); the proxy adds a second
-   * pole that absorbs physics snaps (collision pushes, car-car bumps)
-   * without ever trailing the focus at speed, thanks to the velocity
-   * feed-forward read back in update().
-   */
-  function updateTarget(focus, dt) {
-    const p = rig.proxy;
-    const dx = focus.x - p.x;
-    const dz = focus.z - p.z;
-    if (dx * dx + dz * dz > 25) {
-      // > 5 m gap: a teleport / first frame / respawn, not motion.
-      // Snap the proxy; a glide across the map would be worse.
-      p.x = focus.x;
-      p.z = focus.z;
-      p.y = focus.y ?? 0;
-      p.yaw = focus.heading;
-      p.velX = 0;
-      p.velZ = 0;
-      return;
-    }
-    const kx = 1 - Math.exp(-PROXY_RATE_XZ * dt);
-    p.x += dx * kx;
-    p.z += dz * kx;
-    const ky = 1 - Math.exp(-PROXY_RATE_Y * dt);
-    p.y += ((focus.y ?? 0) - p.y) * ky;
-    let dy = focus.heading - p.yaw;
-    while (dy > Math.PI) dy -= 2 * Math.PI;
-    while (dy < -Math.PI) dy += 2 * Math.PI;
-    p.yaw += dy * (1 - Math.exp(-PROXY_RATE_YAW * dt));
-    // Smoothed travel velocity, built from the focus speed + heading
-    // (never from raw position deltas, so a collision snap cannot
-    // spike it). The feed-forward term in update() is vel / 25.
-    const sp = focus.speed || 0;
-    const tvx = Math.sin(focus.heading) * sp;
-    const tvz = Math.cos(focus.heading) * sp;
-    const kv = 1 - Math.exp(-PROXY_RATE_VEL * dt);
-    p.velX += (tvx - p.velX) * kv;
-    p.velZ += (tvz - p.velZ) * kv;
-  }
-
-  /**
-   * Point-in-building test, same filter as city.raycastBuildings (only
-   * colliders with height >= 3 occlude). Used by the collision guard:
-   * a ray whose origin sits inside an AABB returns 0, which is an
-   * artifact of the origin being inside, not a hit on a wall.
-   */
-  function isInsideBuilding(x, y, z) {
-    for (const b of city.colliders) {
-      if (b.height < 3) continue;
-      if (y >= b.height) continue;
-      if (x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1) return true;
-    }
-    return false;
-  }
-
-  function updateMenu(dt) {
-    rig.menuAngle += dt * 0.045;
-    const cx = Math.sin(rig.menuAngle) * 320;
-    const cz = Math.cos(rig.menuAngle) * 320;
-    camera.position.set(cx, 90 + Math.sin(rig.menuAngle * 0.5) * 12, cz);
-    camera.lookAt(0, 10, -100);
-    camera.fov = 55;
-    camera.updateProjectionMatrix();
-  }
-
-  function updateWasted(dt, ctx) {
-    // F5: slow crane rise over 7 s, blending the look target from the
-    // player toward the police helicopter, ending with the heli framed.
-    // dt here is SIM time (main.js passes steps * STEP), so the rise
-    // follows the game clock, not the render clock.
-    rig.wastedT += dt;
-    const t = Math.min(1, rig.wastedT / 7);
-    const ease = t * t * (3 - 2 * t);
-    const rise = 4 + ease * 34;
-    const px = ctx.playerPos.x;
-    const pz = ctx.playerPos.z;
-    camera.position.set(px - Math.sin(rig.yaw) * 10, rise, pz - Math.cos(rig.yaw) * 10);
-    const heli = rig.wastedHeli || { x: px + 20, y: 40, z: pz - 20 };
-    const lookX = px + (heli.x - px) * ease;
-    const lookY = 1.5 + (heli.y - 1.5) * ease;
-    const lookZ = pz + (heli.z - pz) * ease;
-    camera.lookAt(lookX, lookY, lookZ);
-    camera.fov = 55;
-    camera.updateProjectionMatrix();
-  }
-
-  function update(dt, ctx) {
-    const look = ctx.look || { dx: 0, dy: 0 };
-    const aspect = ctx.aspect || 16 / 9;
-    const speed = ctx.speed || 0;
-    const topSpeed = ctx.topSpeed || 50;
-    const speedFrac = Math.min(1, Math.abs(speed) / Math.max(1, topSpeed));
-
-    if (rig.mode === 'menu') { updateMenu(dt); return; }
-    if (rig.mode === 'wasted') { updateWasted(dt, ctx); return; }
-
-    // --- the camera reads ONLY the proxy (P7 rule 3) ---
-    // The feed-forward term cancels the proxy's steady-state trail:
-    // at constant speed the camera sits the same distance behind the
-    // focus as it does at rest (lag would otherwise be speed / 25).
-    const px = rig.proxy.x + rig.proxy.velX / PROXY_RATE_XZ;
-    const pz = rig.proxy.z + rig.proxy.velZ / PROXY_RATE_XZ;
-    const py = rig.proxy.y;
-
-    // --- yaw / pitch targets per mode ---
-    const sens = 0.0032 * (ctx.sensitivity || 1);
-    if (rig.mode === 'drive') {
-      // In the car the drag is a temporary offset that yields back.
-      // The heading comes from the proxy (already yaw-smoothed), so a
-      // physics snap in the car's heading never reaches the camera raw.
-      rig.dragYaw -= look.dx * sens;
-      rig.dragYaw = Math.max(-1.1, Math.min(1.1, rig.dragYaw));
-      rig.targetYaw = rig.proxy.yaw + rig.dragYaw;
-      rig.targetPitch = 0.24 - Math.min(0.1, speedFrac * 0.06);
-    } else {
-      rig.targetYaw -= look.dx * sens;
-      rig.targetPitch += look.dy * sens * 0.8;
-      rig.targetPitch = Math.max(-0.15, Math.min(0.75, rig.targetPitch));
-      if (rig.mode === 'aim') rig.targetPitch = Math.max(0.02, Math.min(0.4, rig.targetPitch));
-    }
-
-    // Damped follow: critically smooth, never a snap.
-    // P6: the drive camera follows tighter (was 5.5/s) so the car
-    // stops looking diagonal while the heading changes, and a look
-    // drag yields back behind the car faster (decay 1.1 -> 2.0).
-    // P7: the rates are unchanged — the proxy in front adds the second
-    // pole; the total response stays P6's.
-    const yawRate = rig.mode === 'drive' ? 8 : 11;
-    const damp = 1 - Math.exp(-yawRate * dt);
-    rig.yaw += (rig.targetYaw - rig.yaw) * damp;
-    rig.pitch += (rig.targetPitch - rig.pitch) * (1 - Math.exp(-9 * dt));
-    rig.dragYaw *= Math.exp(-2.0 * dt); // look-drag yield
-    rig.recoil *= Math.exp(-7 * dt); // recoil decays fast
-
-    // --- desired camera position ---
-    let dist = rig.mode === 'aim' ? 3.8 : rig.mode === 'drive' ? 8.6 + speedFrac * 2.2 : 6.6;
-    let height = rig.mode === 'drive' ? 2.6 + speedFrac * 0.7 : 2.0;
-    let side = 0;
-    if (rig.mode === 'aim') {
-      side = 0.95; // over-shoulder: Rook sits left of centre, not centred
-      height = 1.9;
-    }
-    const cy = Math.cos(rig.yaw);
-    const sy = Math.sin(rig.yaw);
-    // Camera sits behind the target: pos = target - forward * dist.
-    let camX = px - sy * dist + (-cy) * side;
-    let camZ = pz - cy * dist + (sy) * side;
-    let camY = py + height + Math.tan(rig.pitch + rig.recoil) * dist * 0.55;
-
-    // --- collision: 5-ray spherecast + damped distance (P7 rule 5) ---
-    // The ray runs from the focus eye to the ideal spot. Five rays
-    // (centre + 4 offsets, r = 0.6 m) approximate a swept sphere; the
-    // nearest hit wins, so a thin wall cannot be missed for one frame
-    // and let the camera through. The distance then eases toward the
-    // hit: fast in (12/s) so the camera never clips, slow out (5/s)
-    // with a 3-frame clearance hysteresis so it never pops back and
-    // forth against a grazing edge. Minimum 2.0 m from the focus.
-    const eyeX = px;
-    const eyeY = py + 1.7;
-    const eyeZ = pz;
-    const dirX = camX - eyeX;
-    const dirY = camY - eyeY;
-    const dirZ = camZ - eyeZ;
-    const len = Math.hypot(dirX, dirY, dirZ) || 1;
-    const ux = dirX / len;
-    const uy = dirY / len;
-    const uz = dirZ / len;
-    // Perpendicular basis for the sphere offsets.
-    let ax = -uz;
-    let ay = 0;
-    let az = ux;
-    const aLen = Math.hypot(ax, ay, az) || 1;
-    ax /= aLen; ay /= aLen; az /= aLen;
-    const bx = uy * az - uz * ay;
-    const by = uz * ax - ux * az;
-    const bz = ux * ay - uy * ax;
-    // P10: the eye can end up INSIDE a building when the car wedges into
-    // a wall on impact (measured: eye 1.03 m past the face). A ray cast
-    // from inside an AABB returns 0, so the spherecast would collapse
-    // the desired distance to MIN_CAM_DIST and yank the camera to the
-    // bumper in one frame (measured 4.3-5.4 m/frame). That is an artifact,
-    // not an occlusion: the ideal spot is in open air. Skip the
-    // shortening when the eye is inside a collider and the ideal spot is
-    // not; fall back to the spherecast when the ideal spot is itself
-    // inside a building (genuine occlusion).
-    const eyeInside = isInsideBuilding(eyeX, eyeY, eyeZ);
-    const spotInside = eyeInside && isInsideBuilding(camX, camY, camZ);
-    let desired = len;
-    if (!eyeInside || spotInside) {
-      let nearest = Infinity;
-      const offsets = [[0, 0], [COLLIDE_RADIUS, 0], [-COLLIDE_RADIUS, 0], [0, COLLIDE_RADIUS], [0, -COLLIDE_RADIUS]];
-      for (const [oa, ob] of offsets) {
-        const ox = eyeX + ax * oa + bx * ob;
-        const oy = eyeY + ay * oa + by * ob;
-        const oz = eyeZ + az * oa + bz * ob;
-        const hit = city.raycastBuildings(ox, oy, oz, ux, uy, uz, len);
-        if (hit < nearest) nearest = hit;
-      }
-      if (nearest < Infinity) desired = Math.max(MIN_CAM_DIST, Math.min(len, nearest - 0.45));
-    }
-    if (desired < rig.smoothDist) {
-      rig.smoothDist += (desired - rig.smoothDist) * (1 - Math.exp(-COLLIDE_IN_RATE * dt));
-      rig.clearFrames = 0;
-    } else if (desired > rig.smoothDist + 0.01) {
-      rig.clearFrames += 1;
-      if (rig.clearFrames >= COLLIDE_CLEAR_FRAMES) {
-        rig.smoothDist += (desired - rig.smoothDist) * (1 - Math.exp(-COLLIDE_OUT_RATE * dt));
-      }
-    } else {
-      rig.clearFrames = 0;
-    }
-    // P10: NO hard clamp of smoothDist to len. The old clamp snapped the
-    // camera 4.3 m in one frame when the car was destroyed on impact:
-    // the mode flips drive -> foot, the ideal distance drops 10.8 -> 6.6
-    // m, and the clamp set smoothDist = len instantly (measured: 10.981
-    // -> 6.67 in a single frame). The easing above already owns the
-    // motion (12/s in, 5/s out with hysteresis); a mode/speed change is
-    // just a new desired distance, and it eases there like any other.
-    // smoothDist may sit slightly beyond len for a fraction of a second
-    // after a mode change — a slightly wider shot, not a clip.
-    if (rig.smoothDist < MIN_CAM_DIST) rig.smoothDist = MIN_CAM_DIST;
-    const s = rig.smoothDist / len;
-    camX = eyeX + dirX * s;
-    camY = eyeY + dirY * s;
-    camZ = eyeZ + dirZ * s;
-
-    // --- ground clamp: the camera never goes under the street ---
-    if (camY < 1.25) camY = 1.25;
-
-    // --- trauma shake (crashes / explosions), decays fast ---
-    // P7 rule 2: exponential decay, not a linear ramp.
-    rig.trauma *= Math.exp(-1.4 * dt);
-    if (rig.trauma < 0.01) rig.trauma = 0;
-    const sh = rig.trauma * rig.trauma;
-    const t = performance.now() / 1000;
-    camX += Math.sin(t * 47.3) * sh * 0.35;
-    camY += Math.sin(t * 39.7 + 1.3) * sh * 0.3;
-    camZ += Math.cos(t * 43.1) * sh * 0.35;
-
-    camera.position.set(camX, camY, camZ);
-    const lookX = px + (rig.mode === 'aim' ? sy * 6 : 0);
-    const lookZ = pz + (rig.mode === 'aim' ? cy * 6 : 0);
-    camera.lookAt(lookX, py + 1.55, lookZ);
-
-    // --- FOV: aspect-adaptive + speed kick (F7/F8) ---
-    // P7 rule 2: exponential, not a static 6*dt factor.
-    const wantFov = aspectFov(aspect, rig.mode === 'drive' ? speedFrac : 0);
-    camera.fov += (wantFov - camera.fov) * (1 - Math.exp(-6 * dt));
-    camera.updateProjectionMatrix();
-  }
-
-  return {
-    rig,
-    setMode,
-    update,
-    updateTarget,
-    addTrauma,
-    addRecoil,
-    get yaw() { return rig.yaw; },
-    get mode() { return rig.mode; },
-    get wastedT() { return rig.wastedT; },
-    /** Read-only proxy snapshot for the automated playtest. */
-    get proxy() {
-      return {
-        x: +rig.proxy.x.toFixed(3), z: +rig.proxy.z.toFixed(3),
-        y: +rig.proxy.y.toFixed(3), yaw: +rig.proxy.yaw.toFixed(4),
-        smoothDist: +rig.smoothDist.toFixed(3),
-      };
-    },
-  };
+function damp(rate, dt) {
+  return 1 - Math.exp(-rate * dt);
 }
 
-export { CAM_DT_MAX };
+function shortArc(a, b) {
+  let d = b - a;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  return d;
+}
+
+// Ray vs AABB (slab test). Returns the hit distance or Infinity.
+function rayAabb(ox, oy, oz, dx, dy, dz, b) {
+  let t0 = 0, t1 = Infinity;
+  const axes = [[ox, dx, b.x0, b.x1], [oy, dy, 0, b.h ?? 40], [oz, dz, b.z0, b.z1]];
+  for (const [o, d, lo, hi] of axes) {
+    if (Math.abs(d) < 1e-9) {
+      if (o < lo || o > hi) return Infinity;
+    } else {
+      let ta = (lo - o) / d, tb = (hi - o) / d;
+      if (ta > tb) { const tmp = ta; ta = tb; tb = tmp; }
+      t0 = Math.max(t0, ta);
+      t1 = Math.min(t1, tb);
+      if (t0 > t1) return Infinity;
+    }
+  }
+  return t0;
+}
+
+class ProxyTarget {
+  constructor() {
+    this.x = 0; this.y = 1.4; this.z = 0;
+    this.yaw = 0; this.pitch = 0;
+    this.vx = 0; this.vz = 0;
+  }
+
+  snap(f) {
+    this.x = f.x; this.y = f.y; this.z = f.z;
+    this.yaw = f.heading; this.pitch = f.pitch || 0;
+    this.vx = 0; this.vz = 0;
+  }
+
+  // Chase an interpolated focus. XZ fast, Y slow, yaw shortest-arc.
+  // Feed-forward: aim slightly ahead of the velocity so the proxy does
+  // not lag behind a fast car.
+  chase(f, dt, speed) {
+    const kxz = damp(25, dt);
+    const ky = damp(6, dt);
+    const kyaw = damp(20, dt);
+    const lead = Math.min(0.12, speed * 0.004);
+    const lx = f.x + Math.sin(f.heading) * lead * speed * 0.1;
+    const lz = f.z + Math.cos(f.heading) * lead * speed * 0.1;
+    this.x += (lx - this.x) * kxz;
+    this.z += (lz - this.z) * kxz;
+    this.y += (f.y - this.y) * ky;
+    this.yaw += shortArc(this.yaw, f.heading) * kyaw;
+    this.pitch += ((f.pitch || 0) - this.pitch) * damp(12, dt);
+    this.vx = f.vx || 0;
+    this.vz = f.vz || 0;
+  }
+}
+
+export class CameraRig {
+  constructor(camera, colliders) {
+    this.cam = camera;
+    this.colliders = colliders;
+    this.proxy = new ProxyTarget();
+    this.mode = 'foot';
+    this.dragYaw = 0;
+    this.dragPitch = 0;
+    this.smoothDist = 7;
+    this.distFrames = 0;
+    this.lastShort = Infinity;
+    this.trauma = 0;
+    this.crane = null; // { t, dur, from, heli }
+    this.fovBase = 62;
+    this.yaw = 0;
+    this.pitch = 0;
+    this.time = 0;
+  }
+
+  setMode(mode) {
+    if (this.mode !== mode) {
+      this.mode = mode;
+      if (mode === 'drive') this.dragYaw = 0;
+    }
+  }
+
+  snapTo(focus) {
+    this.proxy.snap(focus);
+    this.smoothDist = this.wantDist(focus);
+    this.dragYaw = 0;
+    this.dragPitch = 0;
+  }
+
+  wantDist(focus) {
+    if (this.mode === 'drive') return 10.5;
+    if (this.mode === 'aim') return 4.2;
+    if (this.mode === 'menu') return 26;
+    return 6.4;
+  }
+
+  wantHeight(focus) {
+    if (this.mode === 'drive') return 3.4;
+    if (this.mode === 'aim') return 2.0;
+    if (this.mode === 'menu') return 12;
+    return 2.3;
+  }
+
+  // Trauma: own car takes the full hit; other cars only when the impact
+  // is hard AND close. Everything else is silent (P7 root cause: AI
+  // traffic scraping walls pinned the player's trauma at ~0.98).
+  addTrauma(amount, dist, impact, isOwn) {
+    if (isOwn) {
+      this.trauma = Math.min(1, this.trauma + amount);
+      return;
+    }
+    if (impact > 4 && dist < 45) {
+      const scaled = amount * (1 - dist / 45) * Math.min(1, impact / 12);
+      this.trauma = Math.min(1, this.trauma + scaled);
+    }
+  }
+
+  startCrane(heliPos) {
+    this.crane = {
+      t: 0, dur: 4.5,
+      fromX: this.cam.position.x, fromY: this.cam.position.y, fromZ: this.cam.position.z,
+      heli: heliPos,
+    };
+    this.mode = 'crane';
+  }
+
+  // 5-ray spherecast: center ray + 4 offset rays (r = 0.6). Returns the
+  // nearest clear distance along the view direction.
+  spherecast(fx, fy, fz, dx, dy, dz, maxDist) {
+    let best = maxDist;
+    const offsets = [[0, 0], [0.6, 0], [-0.6, 0], [0, 0.6], [0, -0.6]];
+    for (const [ox, oy] of offsets) {
+      // Offset perpendicular to the view dir (approx: right/up in world).
+      const rx = -dz, rz = dx;
+      const ox2 = fx + rx * ox, oy2 = fy + oy, oz2 = fz + rz * ox;
+      for (const b of this.colliders) {
+        const t = rayAabb(ox2, oy2, oz2, dx, dy, dz, b);
+        if (t < best) best = t;
+      }
+    }
+    return Math.max(MIN_DIST, best - 0.6);
+  }
+
+  update(dtRaw, focus, opts = {}) {
+    const dt = Math.min(dtRaw, DT_CLAMP);
+    this.time += dt;
+    this.trauma *= Math.exp(-1.4 * dt);
+
+    // Crane mode (F5): rise, orbit slowly, end looking at the helicopter.
+    if (this.mode === 'crane' && this.crane) {
+      const c = this.crane;
+      c.t += dt;
+      const k = Math.min(1, c.t / c.dur);
+      const ease = 1 - Math.pow(1 - k, 3);
+      const ang = this.proxy.yaw + ease * 0.9;
+      const cx = focus.x + Math.sin(ang) * 16;
+      const cz = focus.z + Math.cos(ang) * 16;
+      const cy = 4 + ease * 22;
+      this.cam.position.set(
+        c.fromX + (cx - c.fromX) * ease,
+        c.fromY + (cy - c.fromY) * ease,
+        c.fromZ + (cz - c.fromZ) * ease,
+      );
+      const look = c.heli || { x: focus.x, y: 30, z: focus.z };
+      this.cam.lookAt(look.x, look.y, look.z);
+      if (k >= 1) this.crane.done = true;
+      return;
+    }
+
+    // Apply look deltas from input to the drag offsets (decay back to 0).
+    const look = opts.look || { dx: 0, dy: 0 };
+    this.dragYaw -= look.dx;
+    this.dragPitch = Math.max(-0.55, Math.min(0.55, this.dragPitch - look.dy * 0.6));
+    this.dragYaw *= Math.exp(-2.0 * dt);
+    this.dragPitch *= Math.exp(-2.0 * dt);
+
+    // Proxy chases the interpolated focus.
+    this.proxy.chase(focus, dt, focus.speed || 0);
+    this.yaw = this.proxy.yaw + this.dragYaw;
+    this.pitch = this.proxy.pitch + this.dragPitch;
+
+    // Desired eye: behind the proxy yaw, above the proxy, at mode distance.
+    const dist = this.wantDist(focus);
+    const height = this.wantHeight(focus);
+    const backX = -Math.sin(this.yaw);
+    const backZ = -Math.cos(this.yaw);
+    const eyeX = this.proxy.x + backX * dist;
+    const eyeZ = this.proxy.z + backZ * dist;
+    const eyeY = this.proxy.y + height;
+    const dirX = this.proxy.x - eyeX;
+    const dirZ = this.proxy.z - eyeZ;
+    const dirY = (this.proxy.y + 0.4) - eyeY;
+    const dirLen = Math.hypot(dirX, dirY, dirZ) || 1;
+    const ndx = dirX / dirLen, ndy = dirY / dirLen, ndz = dirZ / dirLen;
+
+    // Collision: spherecast shortens the distance, damped (never a snap).
+    const clear = this.spherecast(this.proxy.x, this.proxy.y + 0.4, this.proxy.z, ndx, ndy, ndz, dist);
+    let target = Math.min(dist, clear);
+    // Hysteresis: only react to a shortening after 3 consistent frames.
+    if (target < this.smoothDist - 0.15) {
+      this.distFrames += 1;
+      if (this.distFrames < 3) target = this.smoothDist;
+    } else {
+      this.distFrames = 0;
+    }
+    const rate = target < this.smoothDist ? 12 : 5;
+    this.smoothDist += (target - this.smoothDist) * damp(rate, dt);
+    // Never closer than the minimum, and never inside a building: if the
+    // eye itself sits inside a collider, hold the distance instead of
+    // collapsing it (P7 wall regression).
+    const eyeInside = this.colliders.some((b) => (
+      eyeX > b.x0 && eyeX < b.x1 && eyeZ > b.z0 && eyeZ < b.z1 && eyeY < (b.h ?? 40)
+    ));
+    if (!eyeInside) this.smoothDist = Math.max(MIN_DIST, this.smoothDist);
+    const finalDist = this.smoothDist;
+    let px = this.proxy.x + backX * finalDist;
+    let py = this.proxy.y + height * (finalDist / dist);
+    let pz = this.proxy.z + backZ * finalDist;
+    // Ground clamp, damped: keep the eye above the street.
+    if (py < GROUND_MIN) py = GROUND_MIN + (py - GROUND_MIN) * 0.2;
+
+    // Aim mode: shift the eye to the right shoulder.
+    if (this.mode === 'aim') {
+      px += Math.cos(this.yaw) * 0.9;
+      pz += -Math.sin(this.yaw) * 0.9;
+    }
+
+    this.cam.position.set(px, py, pz);
+    const lookX = this.proxy.x + Math.sin(this.yaw) * 4;
+    const lookZ = this.proxy.z + Math.cos(this.yaw) * 4;
+    const lookY = this.proxy.y + 0.6 + this.pitch * 6;
+    this.cam.lookAt(lookX, lookY, lookZ);
+
+    // Trauma shake: small rotational noise, scaled by trauma.
+    if (this.trauma > 0.001) {
+      const s = this.trauma * this.trauma * 0.05;
+      this.cam.rotation.x += (Math.random() - 0.5) * s;
+      this.cam.rotation.y += (Math.random() - 0.5) * s;
+      this.cam.rotation.z += (Math.random() - 0.5) * s * 0.6;
+    }
+
+    // FOV: base + speed kick (drive only) + portrait compensation (F8).
+    const aspect = this.cam.aspect || 1.6;
+    let fov = this.fovBase;
+    if (this.mode === 'drive') fov += Math.min(14, (focus.speed || 0) * 0.22);
+    if (aspect < 1) fov += Math.min(18, (1 - aspect) * 22);
+    if (Math.abs(this.cam.fov - fov) > 0.05) {
+      this.cam.fov += (fov - this.cam.fov) * damp(4, dt);
+      this.cam.updateProjectionMatrix();
+    }
+  }
+}

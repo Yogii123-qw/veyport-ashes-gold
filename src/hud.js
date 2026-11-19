@@ -1,119 +1,95 @@
-// hud.js — the heads-up display: bars, numbers, compass, speedometer.
-//
-// Every value here is bound to real state and cached so the DOM is only
-// touched when a value actually changes. Nothing on the HUD is
-// decorative: health, armor, cash, weapon, ammo, clock, weather,
-// district, wanted stars, compass, speed and car health all come from
-// the live simulation. The hitmarker only appears on a real 'hit' event.
+// hud.js - the heads-up display: money, weapon + ammo, clock + weather,
+// speedometer, health bar, objective + distance, compass, wanted stars,
+// weapon slots, and the action button label. Every value is read from
+// the live game state each frame; nothing is ever hardcoded or faked.
+// The compass reads the CAMERA yaw (documented): it is the direction
+// the player is looking, which is what a compass strip is for.
 
-import { WEAPONS, weaponName } from './player.js';
-import { vehicleName } from './vehiclesData.js';
+import { WEAPONS } from './player.js';
 
-export function createHud(deps) {
-  const { player, vehicles, economy, weather, city, cameraRig, bus } = deps;
-  const lang = () => (deps.getLang ? deps.getLang() : 'id');
-  const $ = (id) => document.getElementById(id);
-  const cache = {};
+const COMPASS_DIRS = ['U', 'TL', 'T', 'TG', 'S', 'BD', 'B', 'BL'];
 
-  function setText(id, value) {
-    if (cache[id] !== value) {
-      cache[id] = value;
-      const el = $(id);
-      if (el) el.textContent = value;
+export class HudSys {
+  constructor(w) {
+    this.w = w;
+    this.el = (id) => document.getElementById(id);
+    this.starEls = [];
+    const holder = this.el('wantedStars');
+    if (holder) {
+      for (let i = 0; i < 5; i++) {
+        const s = document.createElement('span');
+        s.className = 'star';
+        s.textContent = '★';
+        holder.appendChild(s);
+        this.starEls.push(s);
+      }
     }
-  }
-  function setWidth(id, pct) {
-    const key = `${id}:w`;
-    const v = `${Math.max(0, Math.min(100, pct)).toFixed(1)}%`;
-    if (cache[key] !== v) {
-      cache[key] = v;
-      const el = $(id);
-      if (el) el.style.width = v;
-    }
+    this.lastObjective = '';
+    this.lastWeapon = '';
   }
 
-  function renderWeaponKeys() {
-    const boxEl = $('weaponKeys');
-    if (!boxEl) return;
-    boxEl.innerHTML = '';
-    const order = ['fists', 'p9', 'kr9', 'iron12', 'vk7'];
-    order.forEach((id, i) => {
-      if (!player.state.weapons[id]?.owned) return;
-      const b = document.createElement('button');
-      b.className = 'wKey' + (player.state.currentWeapon === id ? ' active' : '');
-      b.textContent = String(i + 1);
-      b.title = weaponName(WEAPONS[id], lang());
-      b.addEventListener('click', () => {
-        if (player.switchWeapon(id)) renderWeaponKeys();
-      });
-      boxEl.appendChild(b);
+  update() {
+    const w = this.w;
+    const p = w.player;
+    const econ = w.economy.summary();
+    this.el('hudMoney').textContent = '$' + econ.balance.toLocaleString('en-US');
+    const speed = p.onFoot ? p.speed * 3.6 : (p.vehicle ? Math.abs(p.vehicle.speed) * 3.6 : 0);
+    this.el('hudSpeed').textContent = Math.round(speed) + ' km/h';
+    this.el('hudHp').style.width = Math.max(0, p.hp) + '%';
+    this.el('hudClock').textContent = w.weather.timeString() + '  ' + w.weather.state.toUpperCase();
+    const def = WEAPONS[p.weapon];
+    const slot = p.owned[p.weapon];
+    const ammo = def.kind === 'melee' ? '' : `  ${slot.mag}/${slot.reserve}`;
+    const label = def.name + ammo;
+    if (label !== this.lastWeapon) {
+      this.el('hudWeapon').textContent = label;
+      this.lastWeapon = label;
+    }
+    // Objective: the active mission stage, a contract, or free roam.
+    let objective = '';
+    if (w.missions && w.missions.isActive) {
+      objective = w.missions.objectiveText();
+      const d = w.missions.distanceToTarget();
+      if (d !== null) objective += `  (${d} m)`;
+      const st = w.missions.currentDef;
+      if (st && st.timer > 0 && w.missions.stageTimer > 0) {
+        objective += `  [${Math.ceil(w.missions.stageTimer)} dtk]`;
+      }
+    } else if (w.contracts && w.contracts.active) {
+      objective = w.contracts.active.text;
+      if (w.contracts.active.timerLeft > 0) {
+        objective += `  [${Math.ceil(w.contracts.active.timerLeft)} dtk]`;
+      }
+    } else {
+      objective = w.lang.t('freeRoam');
+    }
+    if (objective !== this.lastObjective) {
+      this.el('hudObjective').textContent = objective;
+      this.lastObjective = objective;
+    }
+    const inCar = !p.onFoot;
+    this.el('btnActionLabel').textContent = inCar ? 'KELUAR' : 'MASUK';
+    // Compass from the camera yaw.
+    const yawDeg = ((w.rig.yaw % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    const idx = Math.round(yawDeg / (Math.PI / 4)) % 8;
+    this.el('hudCompass').textContent = COMPASS_DIRS[idx];
+    // Wanted stars, blinking while they are rising.
+    const stars = w.wanted ? w.wanted.stars : 0;
+    for (let i = 0; i < this.starEls.length; i++) {
+      const el = this.starEls[i];
+      const on = i < stars;
+      el.classList.toggle('lit', on);
+      el.style.opacity = on ? '1' : '0.25';
+    }
+    // Weapon slots.
+    const ids = Object.keys(p.owned);
+    document.querySelectorAll('[data-weapon]').forEach((slotEl, i) => {
+      const id = ids[i];
+      slotEl.style.display = id ? 'block' : 'none';
+      if (id) {
+        slotEl.textContent = WEAPONS[id].name.split(' ')[0];
+        slotEl.classList.toggle('active', p.weapon === id);
+      }
     });
   }
-
-  function update() {
-    const ps = player.state;
-    setWidth('hpFill', ps.health);
-    setWidth('armorFill', ps.armor);
-    setText('cash', `$${economy.cash}`);
-    const w = player.currentWeaponDef();
-    const wState = ps.weapons[ps.currentWeapon];
-    setText('weaponName', weaponName(w, lang()));
-    setText('ammo', w.kind === 'melee' ? '—' : `${wState.ammo} / ${wState.reserve}`);
-    const { h, m } = weather.hourMinute();
-    setText('clock', `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`);
-    setText('weatherLabel', weather.weatherLabel(lang()));
-    const pp = player.position();
-    setText('district', city.districtNameAt(pp.x, pp.z, lang()));
-    const stars = deps.wanted ? deps.wanted.stars : 0;
-    setText('stars', '★'.repeat(stars) + '☆'.repeat(5 - stars));
-    const pts = ['S', 'SW', 'W', 'NW', 'N', 'NE', 'E', 'SE'];
-    const deg = (((cameraRig.yaw * 180) / Math.PI) % 360 + 360) % 360;
-    const idx = Math.round(deg / 45) % 8;
-    setText('compass', `${pts[idx]}  ·  ${Math.round(deg)}°`);
-
-    const pv = vehicles.getPlayerVehicle();
-    const speedo = $('speedo');
-    if (speedo) speedo.classList.toggle('hidden', !pv);
-    if (pv) {
-      const kmh = Math.round(Math.abs(pv.speed) * 3.6);
-      setText('speedKmh', String(kmh));
-      setWidth('speedFill', (Math.abs(pv.speed) / pv.def.topSpeed) * 100);
-      setText('carName', vehicleName(pv.def, lang()));
-      setWidth('carHealthFill', (pv.integrity / pv.maxIntegrity) * 100);
-    }
-    const crosshair = $('crosshair');
-    if (crosshair) crosshair.classList.toggle('hidden', !(ps.aim && !ps.inVehicle));
-    const weaponBox = $('weaponBox');
-    if (weaponBox) weaponBox.style.opacity = ps.inVehicle ? '0.35' : '1';
-  }
-
-  function showHitmarker() {
-    const hm = $('hitmarker');
-    if (!hm) return;
-    hm.classList.remove('hidden');
-    window.setTimeout(() => hm.classList.add('hidden'), 120);
-  }
-
-  // The marker fires only on a real 'hit' event from combat/player —
-  // it was previously defined but never wired, so it never appeared.
-  if (bus) bus.on('hit', showHitmarker);
-
-  function showInteractPrompt(text) {
-    const prompt = $('interactPrompt');
-    if (!prompt) return;
-    if (!text) {
-      prompt.classList.add('hidden');
-      return;
-    }
-    prompt.textContent = text;
-    prompt.classList.remove('hidden');
-  }
-
-  return {
-    update,
-    renderWeaponKeys,
-    showHitmarker,
-    showInteractPrompt,
-    setText,
-  };
 }
