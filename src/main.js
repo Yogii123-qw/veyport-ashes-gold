@@ -20,7 +20,7 @@ import { createVehicles } from './vehicles.js';
 import { vehicleName } from './vehiclesData.js';
 import { createPlayer, WEAPONS, weaponName } from './player.js';
 import { createInput } from './input.js';
-import { createCameraRig } from './camera.js';
+import { createCameraRig, CAM_DT_MAX } from './camera.js';
 import { createWeather, WEATHERS } from './weather.js';
 import { createEconomy } from './economy.js';
 import { createAudio } from './audio.js';
@@ -261,7 +261,27 @@ bus.on('vehicle-destroyed', ({ vehicle }) => {
     cameraRig.setMode('foot');
   }
 });
-bus.on('crash', () => cameraRig.addTrauma(settings.reduceShake ? 0.08 : 0.3));
+bus.on('crash', ({ vehicle, speed, x, z }) => {
+  // P7: only crashes involving the focus shake the camera. The physics
+  // emits 'crash' for EVERY vehicle on any wall touch, and traffic AI
+  // scrapes walls constantly — before this gate, distant traffic
+  // crashes shook the player's camera while just walking (measured
+  // trauma spikes 0.16-0.25 with no player involvement). The player's
+  // own car keeps the full shake; a nearby crash shakes less with
+  // distance, and anything beyond 45 m or slower than 4 m/s is silent.
+  const pv = vehicles.getPlayerVehicle();
+  if (vehicle && pv && vehicle === pv) {
+    cameraRig.addTrauma(settings.reduceShake ? 0.08 : 0.3);
+    return;
+  }
+  const impact = Math.abs(speed || 0);
+  if (impact <= 4) return;
+  const p = player.position();
+  const d = Math.hypot((x || 0) - p.x, (z || 0) - p.z);
+  if (d >= 45) return;
+  const amount = (settings.reduceShake ? 0.08 : 0.3) * (1 - d / 45) * Math.min(1, impact / 12);
+  cameraRig.addTrauma(amount);
+});
 bus.on('wasted-start', ({ heli }) => {
   cameraRig.setMode('wasted', { heliPos: heli });
 });
@@ -274,7 +294,6 @@ const WEAPON_ORDER = ['fists', 'p9', 'kr9', 'iron12', 'vk7'];
 
 function step(dt) {
   simTime += dt;
-  const look = input.takeLook();
   const actions = input.takeActions();
 
   if (actions.has('pause')) {
@@ -355,7 +374,7 @@ function step(dt) {
   } else if (wanted.flow === 'none' && cameraRig.mode === 'wasted') {
     cameraRig.setMode('foot');
   } else if (ps.inVehicle && cameraRig.mode !== 'drive') {
-    cameraRig.setMode('drive', { heading: ps.vehicle.heading });
+    cameraRig.setMode('drive', { heading: ps.vehicle.heading, x: ps.vehicle.x, z: ps.vehicle.z });
   } else if (!ps.inVehicle && cameraRig.mode === 'drive') {
     cameraRig.setMode(ps.aim ? 'aim' : 'foot');
   } else if (!ps.inVehicle && ps.aim && cameraRig.mode === 'foot') {
@@ -364,20 +383,8 @@ function step(dt) {
     cameraRig.setMode('foot');
   }
 
-  const pv = vehicles.getPlayerVehicle();
-  const camCtx = {
-    playerPos: { x: ps.inVehicle && pv ? pv.x : ps.x, y: 0, z: ps.inVehicle && pv ? pv.z : ps.z },
-    heading: pv ? pv.heading : ps.heading,
-    speed: pv ? pv.speed : ps.speed,
-    topSpeed: pv ? pv.def.topSpeed : 8.5,
-    look,
-    sensitivity: settings.sensitivity,
-    aspect: camera.aspect,
-    aiming: ps.aim,
-  };
-  cameraRig.update(dt, camCtx);
-
   // Headlight follows the player's car at night.
+  const pv = vehicles.getPlayerVehicle();
   if (pv) {
     const night = weather.nightFactor();
     headlight.intensity = night * 120;
@@ -442,6 +449,40 @@ function step(dt) {
   });
 }
 
+// ---------- Render interpolation (P7 rule 4) ----------
+// The camera reads the focus interpolated between the previous and
+// current physics states, so a render never shows a raw stepped state
+// (at 90/120 Hz the same state would otherwise repeat for 1-2 frames
+// and then jump — the judder Monch reported). Follows Fiedler's fixed
+// timestep pattern: prev is the state before the last step, curr the
+// state after it, alpha = accumulator / STEP. STEP and the physics are
+// untouched; only the camera's input is interpolated.
+let focusPrev = null;
+let focusCurr = null;
+
+function readFocus() {
+  const ps = player.state;
+  const pv = vehicles.getPlayerVehicle();
+  if (ps.inVehicle && pv) {
+    return { key: pv.id, x: pv.x, z: pv.z, y: 0, heading: pv.heading, speed: pv.speed };
+  }
+  return { key: 'p', x: ps.x, z: ps.z, y: 0, heading: ps.heading, speed: ps.speed || 0 };
+}
+
+function interpFocus(alpha) {
+  if (!focusPrev || !focusCurr) return readFocus();
+  let dh = focusCurr.heading - focusPrev.heading;
+  while (dh > Math.PI) dh -= 2 * Math.PI;
+  while (dh < -Math.PI) dh += 2 * Math.PI;
+  return {
+    x: focusPrev.x + (focusCurr.x - focusPrev.x) * alpha,
+    z: focusPrev.z + (focusCurr.z - focusPrev.z) * alpha,
+    y: 0,
+    heading: focusPrev.heading + dh * alpha,
+    speed: focusPrev.speed + (focusCurr.speed - focusPrev.speed) * alpha,
+  };
+}
+
 // ---------- Main loop ----------
 let last = performance.now();
 let accumulator = 0;
@@ -450,17 +491,62 @@ function frame(now) {
   requestAnimationFrame(frame);
   const frameDt = Math.min((now - last) / 1000, MAX_FRAME);
   last = now;
+  if (!focusCurr) {
+    focusCurr = readFocus();
+    focusPrev = focusCurr;
+  }
+  let stepsRun = 0;
   if (screen === 'play') {
     accumulator += frameDt;
     while (accumulator >= STEP) {
+      // Snapshot around the step: prev = state before, curr = after.
+      focusPrev = focusCurr;
       step(STEP);
+      focusCurr = readFocus();
+      // No interpolation across an entity switch (enter/exit vehicle)
+      // or a teleport/respawn (a single step moves at most ~1.2 m at
+      // top speed, so a > 3 m jump is a teleport, not motion).
+      if (focusPrev.key !== focusCurr.key) {
+        focusPrev = focusCurr;
+      } else {
+        const dx = focusCurr.x - focusPrev.x;
+        const dz = focusCurr.z - focusPrev.z;
+        if (dx * dx + dz * dz > 9) focusPrev = focusCurr;
+      }
       accumulator -= STEP;
+      stepsRun++;
       if (screen !== 'play') { accumulator = 0; break; }
     }
+    // P7 rule 1: the camera updates ONCE per render frame, LAST before
+    // the render, after the physics accumulator — never inside step().
+    // P7 rule 2: its dt is the render frame dt clamped to 0.05 s.
+    const alpha = Math.max(0, Math.min(1, accumulator / STEP));
+    const interp = interpFocus(alpha);
+    const frameDtCam = Math.min(frameDt, CAM_DT_MAX);
+    cameraRig.updateTarget(interp, frameDtCam);
+    const look = input.takeLook();
+    const pv = vehicles.getPlayerVehicle();
+    const ps = player.state;
+    // The WASTED crane rise follows the GAME clock (7 s), so it gets
+    // the sim time advanced this frame, not the render dt.
+    const camDt = cameraRig.mode === 'wasted' ? stepsRun * STEP : frameDtCam;
+    cameraRig.update(camDt, {
+      look,
+      speed: interp.speed,
+      topSpeed: pv ? pv.def.topSpeed : 8.5,
+      aspect: camera.aspect,
+      sensitivity: settings.sensitivity,
+      aiming: ps.aim,
+      playerPos: { x: interp.x, y: 0, z: interp.z },
+    });
   } else if (screen === 'menu') {
     // The menu orbits the live city; the world itself stays frozen.
     cameraRig.update(frameDt, { playerPos: { x: 0, y: 0, z: 0 }, look: { dx: 0, dy: 0 }, aspect: camera.aspect });
     effects.update(frameDt);
+  } else {
+    // Paused / map / shop: the camera is frozen. Drain accumulated
+    // look deltas so no stale drag jumps the camera on resume.
+    input.takeLook();
   }
   renderer.render(scene, camera);
 }
