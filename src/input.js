@@ -36,10 +36,19 @@ const TOUCH_TAP = [
   ['btnInteract', 'interact'],
 ];
 
+// P4: a resting thumb must not steer the camera. A look-drag only
+// engages after a deliberate flick: the touch must travel at least
+// 6 px from where it landed, in a single move of at least 3 px.
+// Before that, every move is dropped. Once engaged, the whole
+// displacement since touch-down feeds through, so a deliberate 60 px
+// drag still turns ~0.42 rad — exactly as measured before P4.
+const LOOK_DEADZONE_PX = 6;
+const LOOK_MIN_STEP_PX = 3;
+
 export function createInput() {
   const keys = new Set();
   const pressed = new Set(); // edge-triggered: consumed by takeActions()
-  const joy = { active: false, id: -1, x: 0, y: 0, mag: 0, lookId: -1, lastX: 0, lastY: 0 };
+  const joy = { active: false, id: -1, x: 0, y: 0, mag: 0, lookId: -1, lastX: 0, lastY: 0, lookEngaged: false, lookStartX: 0, lookStartY: 0 };
   const touch = { run: false, fire: false, aim: false, brake: false, action: false, interact: false };
   const look = { dx: 0, dy: 0 }; // accumulated mouse/touch-drag look deltas
   let mouseDown = false;
@@ -135,6 +144,10 @@ export function createInput() {
         joy.lookId = t.identifier;
         joy.lastX = t.clientX;
         joy.lastY = t.clientY;
+        // P4: the drag starts disengaged — see onTouchMove.
+        joy.lookEngaged = false;
+        joy.lookStartX = t.clientX;
+        joy.lookStartY = t.clientY;
       }
     }
   }
@@ -146,8 +159,30 @@ export function createInput() {
         joyKnob.style.transform = `translate(${p.dx * 34}px, ${p.dy * 34}px)`;
         e.preventDefault();
       } else if (t.identifier === joy.lookId) {
-        look.dx += (t.clientX - joy.lastX) * 2.2 * lookScale;
-        look.dy += (t.clientY - joy.lastY) * 2.2 * lookScale;
+        // P4 dead zone: a resting thumb or slow drift must not steer
+        // the camera. The drag only engages after a deliberate flick
+        // (>= 6 px from touch-down, in a step of >= 3 px); once
+        // engaged, the whole displacement since touch-down feeds
+        // through, so a deliberate 60 px drag still turns ~0.42 rad.
+        const stepX = t.clientX - joy.lastX;
+        const stepY = t.clientY - joy.lastY;
+        let feedX = 0;
+        let feedY = 0;
+        if (joy.lookEngaged) {
+          feedX = stepX;
+          feedY = stepY;
+        } else {
+          const fromStartX = t.clientX - joy.lookStartX;
+          const fromStartY = t.clientY - joy.lookStartY;
+          if (Math.hypot(fromStartX, fromStartY) >= LOOK_DEADZONE_PX
+            && Math.hypot(stepX, stepY) >= LOOK_MIN_STEP_PX) {
+            joy.lookEngaged = true;
+            feedX = fromStartX;
+            feedY = fromStartY;
+          }
+        }
+        look.dx += feedX * 2.2 * lookScale;
+        look.dy += feedY * 2.2 * lookScale;
         joy.lastX = t.clientX;
         joy.lastY = t.clientY;
         e.preventDefault();
@@ -160,7 +195,10 @@ export function createInput() {
         joy.active = false; joy.id = -1; joy.x = 0; joy.y = 0; joy.mag = 0;
         joyKnob.style.transform = 'translate(0px, 0px)';
       }
-      if (t.identifier === joy.lookId) joy.lookId = -1;
+      if (t.identifier === joy.lookId) {
+        joy.lookId = -1;
+        joy.lookEngaged = false;
+      }
     }
   }
   document.addEventListener('touchstart', onTouchStart, { passive: true });

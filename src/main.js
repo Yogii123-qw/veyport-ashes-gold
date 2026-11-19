@@ -286,8 +286,11 @@ function step(dt) {
   if (actions.has('map')) { setScreen('map'); return; }
 
   // A dialog freezes the world: the player cannot act, so neither can it.
+  // P5: the busted/wasted clock is NOT the world — it keeps running
+  // behind a dialog, so an arrest/hospital flow can never freeze there.
   if (dialogs.isOpen) {
     dialogs.update(dt);
+    wanted.tickFlow(dt);
     return;
   }
 

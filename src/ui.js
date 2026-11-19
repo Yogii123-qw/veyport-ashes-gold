@@ -89,18 +89,45 @@ export function createUI(deps) {
     };
   }
 
+  // P5: the auto-hide timer id per overlay — cleared on every show
+  // and on every manual dismiss, so a stale timer can never hide a
+  // LATER overlay early.
+  let wastedTimer = 0;
+  let bustedTimer = 0;
+
+  function hideWasted() {
+    if (!wastedEl) return;
+    window.clearTimeout(wastedTimer);
+    wastedEl.classList.add('hidden');
+  }
+
+  function hideBusted() {
+    if (!bustedEl) return;
+    window.clearTimeout(bustedTimer);
+    bustedEl.classList.add('hidden');
+  }
+
   function showWasted(bill) {
     if (!wastedEl) return;
+    window.clearTimeout(wastedTimer);
     wastedEl.classList.remove('hidden');
     $('wastedBill').textContent = `${t('hospitalBill', lang())}: $${bill}`;
-    window.setTimeout(() => wastedEl.classList.add('hidden'), 2600);
+    // P5: tap-to-continue — the player dismisses the overlay at once
+    // instead of staring at a dead screen; the 2.6 s auto-hide stays
+    // as a fallback for players who never tap.
+    const btn = $('btnWastedContinue');
+    if (btn) btn.onclick = () => hideWasted();
+    wastedTimer = window.setTimeout(hideWasted, 2600);
   }
 
   function showBusted(fine) {
     if (!bustedEl) return;
+    window.clearTimeout(bustedTimer);
     bustedEl.classList.remove('hidden');
     $('bustedFine').textContent = `${t('fine', lang())}: $${fine}`;
-    window.setTimeout(() => bustedEl.classList.add('hidden'), 2600);
+    const btn = $('btnBustedContinue');
+    if (btn) btn.onclick = () => hideBusted();
+    bustedTimer = window.setTimeout(hideBusted, 2600);
   }
 
   function showEnding(ending) {

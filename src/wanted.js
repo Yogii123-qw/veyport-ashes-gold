@@ -251,21 +251,29 @@ export function createWanted(deps) {
     bus.emit('wasted-done', { bill });
   }
 
+  // P5: the busted/wasted clock alone, without any world animation.
+  // step() calls this even while a mission dialog is open, so an
+  // arrest or hospital flow can never freeze behind a dialog.
+  function tickFlow(dt) {
+    if (state.flow === 'busted') {
+      flowTimer += dt;
+      if (flowTimer > 2.2) finishBusted();
+    } else if (state.flow === 'wasted') {
+      flowTimer += dt;
+      if (flowTimer > 7.2) finishWasted();
+    }
+  }
+
   // ---------- Per-frame ----------
   function update(dt, ctx) {
     const pp = player.position();
     const ps = player.state;
 
     // --- Active flow (busted / wasted) runs its own clock ---
-    if (state.flow === 'busted') {
-      flowTimer += dt;
-      if (flowTimer > 2.2) finishBusted();
-      return;
-    }
-    if (state.flow === 'wasted') {
-      flowTimer += dt;
-      // The crane shot is 7 s; the helicopter hovers overhead meanwhile.
-      if (heli && heliMesh) {
+    // The helicopter hover below is world animation, so it stays
+    // here (frozen with the world); the clock itself is tickFlow().
+    if (state.flow === 'busted' || state.flow === 'wasted') {
+      if (state.flow === 'wasted' && heli && heliMesh) {
         heliMesh.group.position.set(pp.x + 22, 40, pp.z - 22);
         heliMesh.rotor.rotation.y += dt * 22;
         heliSpot.position.copy(heliMesh.group.position);
@@ -275,7 +283,7 @@ export function createWanted(deps) {
         heli.y = 40;
         heli.z = heliMesh.group.position.z;
       }
-      if (flowTimer > 7.2) finishWasted();
+      tickFlow(dt);
       return;
     }
 
@@ -470,6 +478,7 @@ export function createWanted(deps) {
     state,
     police,
     update,
+    tickFlow,
     addHeat,
     clearWanted,
     takeDamage,
