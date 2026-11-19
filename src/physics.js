@@ -109,7 +109,13 @@ export function createPhysics(deps) {
 
     // Visuals: body lean + wheel spin.
     v.wheelSpin += (v.speed / 0.36) * dt;
-    if (v.wheels) v.wheels.rotation.x = v.wheelSpin;
+    // Spin per-wheel meshes around their own axles. A merged single-mesh
+    // wheel set is NEVER rotated: rotating it around the mesh origin
+    // orbits the wheel centres instead of spinning the wheels (P9).
+    // Traffic/police wheels stay static — invisible at range.
+    if (Array.isArray(v.wheels)) {
+      for (const w of v.wheels) w.rotation.x = v.wheelSpin;
+    }
     if (v.root) {
       v.root.position.set(v.x, 0, v.z);
       v.root.rotation.y = v.heading;

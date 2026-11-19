@@ -193,6 +193,20 @@ export function buildVehicleWheels(def) {
   return mergeGeoms(parts);
 }
 
+/** One wheel centred at the origin, axle along local X. The player car
+ *  gets four meshes sharing this geometry (one per corner) so each wheel
+ *  spins around its OWN axle. A single merged 4-wheel mesh can never do
+ *  that: rotating it orbits the wheel centres around the car centreline
+ *  instead of spinning them in place (P9 — two wheels over the roof). */
+export function buildSingleWheel(def) {
+  const r = def.cls === 'supercar' ? 0.3 : 0.36;
+  const w = def.cls === 'supercar' ? 0.26 : 0.22;
+  return mergeGeoms([
+    cyl(r, r, w, 10, 0x141414, 0, 0, 0, 0, 0, Math.PI / 2),
+    cyl(r * 0.55, r * 0.55, w + 0.02, 8, 0x9aa0a8, 0, 0, 0, 0, 0, Math.PI / 2),
+  ]);
+}
+
 let vehicleIdCounter = 1;
 
 export function createVehicles(scene, city, bus) {
@@ -205,9 +219,11 @@ export function createVehicles(scene, city, bus) {
   const physics = createPhysics({ city, bus });
 
   // Geometry cache: one merged body per (type, colour), one wheel set
-  // per type. Shared geometries are never disposed on removal.
+  // per type, one single wheel per type. Shared geometries are never
+  // disposed on removal.
   const bodyCache = new Map();
   const wheelCache = new Map();
+  const singleWheelCache = new Map();
   function bodyGeometry(def, color) {
     const key = `${def.id}:${color}`;
     if (!bodyCache.has(key)) bodyCache.set(key, buildVehicleBody(def, color));
@@ -216,6 +232,13 @@ export function createVehicles(scene, city, bus) {
   function wheelGeometry(def) {
     if (!wheelCache.has(def.id)) wheelCache.set(def.id, buildVehicleWheels(def));
     return wheelCache.get(def.id);
+  }
+  function singleWheelGeometry(def) {
+    if (!singleWheelCache.has(def.id)) singleWheelCache.set(def.id, buildSingleWheel(def));
+    return singleWheelCache.get(def.id);
+  }
+  function axleHeight(def) {
+    return def.cls === 'supercar' ? 0.3 : 0.36;
   }
 
   const vehicles = [];
@@ -226,7 +249,7 @@ export function createVehicles(scene, city, bus) {
     const color = opts.color ?? def.colors[Math.floor(rng() * def.colors.length)];
     const body = new THREE.Mesh(bodyGeometry(def, color), bodyMat);
     const wheels = new THREE.Mesh(wheelGeometry(def), wheelMat);
-    wheels.position.y = def.cls === 'supercar' ? 0.3 : 0.36;
+    wheels.position.y = axleHeight(def);
     body.castShadow = true;
     const root = new THREE.Group();
     root.add(body);
@@ -353,8 +376,44 @@ export function createVehicles(scene, city, bus) {
     }
   }
 
+  /** Give a car four separate wheel meshes (player car only): each mesh
+   *  sits at its corner with the wheel centre as its origin, so
+   *  rotation.x spins it around its own axle. The merged mesh leaves the
+   *  root (its geometry stays cached for the revert). */
+  function attachPlayerWheels(v) {
+    if (Array.isArray(v.wheels)) return;
+    v.root.remove(v.wheels);
+    const def = v.def;
+    const y = axleHeight(def);
+    const hx = def.width / 2 - 0.05;
+    const hz = def.length * 0.32;
+    const wheels = [];
+    for (const sx of [1, -1]) {
+      for (const sz of [1, -1]) {
+        const m = new THREE.Mesh(singleWheelGeometry(def), wheelMat);
+        m.position.set(sx * hx, y, sz * hz);
+        m.rotation.x = v.wheelSpin;
+        v.root.add(m);
+        wheels.push(m);
+      }
+    }
+    v.wheels = wheels;
+  }
+
+  /** Back to the shared merged wheel mesh (traffic/parked form). */
+  function revertMergedWheels(v) {
+    if (!Array.isArray(v.wheels)) return;
+    for (const m of v.wheels) v.root.remove(m);
+    const wheels = new THREE.Mesh(wheelGeometry(v.def), wheelMat);
+    wheels.position.y = axleHeight(v.def);
+    v.root.add(wheels);
+    v.wheels = wheels;
+  }
+
   function setPlayerVehicle(v) {
+    if (playerVehicle && playerVehicle !== v) revertMergedWheels(playerVehicle);
     playerVehicle = v;
+    if (v) attachPlayerWheels(v);
   }
 
   function getPlayerVehicle() {
