@@ -1,227 +1,134 @@
-// Traffic: cars that follow the road graph, stop at red lights, yield
-// to trouble ahead, and pull over for sirens. Density follows the clock
-// and the weather. Every traffic car is a real fleet vehicle — it can
-// be carjacked, crashed and sold like any other.
+// traffic.js — the city's traffic: cars that go somewhere.
+//
+// Traffic cars pick a far destination, follow the road graph, slow for
+// the car ahead, and re-route when stuck. They never teleport into the
+// player's view: a car that finishes its route far away gets a new one,
+// and one that ends up too close to the player is respawned far away.
+// Supercars stay rare: a separate 4% roll, never part of the everyday
+// mix. Parked cars (including the early supercar by the safehouse, F4)
+// live in the fleet module, not here.
 
-import * as THREE from 'three';
-import { SUPERCAR_TYPES, TRAFFIC_WEIGHTS } from '../data/vehiclesData.js';
-import { clamp, dampAngle, dist2 } from './utils.js';
+import { CIVILIAN_TYPES, SUPERCAR_TYPES, TRAFFIC_WEIGHTS, SUPERCAR_TRAFFIC_CHANCE } from './vehiclesData.js';
 
-const LIGHT_CYCLE = 21;
+const TRAFFIC_COUNT = 18;
 
-export function createTraffic(game) {
-  const managed = [];
-  let spawnTimer = 0;
-  let lightTime = 0;
-  const lightHeads = [];
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
-  // Traffic-light poles at every other grid intersection: three
-  // InstancedMeshes (poles, red lamps, green lamps) for all 16 heads,
-  // so the whole signal system costs 3 draw calls. Lamp brightness is
-  // per-instance color on a basic material.
-  const poleMat = new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.8 });
-  const poleGeo = new THREE.CylinderGeometry(0.14, 0.2, 5.4, 6);
-  const lampGeo = new THREE.SphereGeometry(0.28, 8, 6);
-  const GRID = [-450, -150, 150, 450];
-  const headPositions = [];
-  for (const gx of GRID) {
-    for (const gz of GRID) {
-      headPositions.push({ x: gx + 8.5, z: gz + 8.5, offset: ((gx + gz) / 150) % 2 === 0 ? 0 : LIGHT_CYCLE / 2, gx, gz });
-    }
+function pickWeighted(rng, weights) {
+  let total = 0;
+  for (const k of Object.keys(weights)) total += weights[k];
+  let r = rng() * total;
+  for (const k of Object.keys(weights)) {
+    r -= weights[k];
+    if (r <= 0) return k;
   }
-  const poleMesh = new THREE.InstancedMesh(poleGeo, poleMat, headPositions.length);
-  const redMesh = new THREE.InstancedMesh(lampGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), headPositions.length);
-  const greenMesh = new THREE.InstancedMesh(lampGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), headPositions.length);
-  const tmpMatrix = new THREE.Matrix4();
-  const tmpColor = new THREE.Color();
-  headPositions.forEach((head, i) => {
-    tmpMatrix.makeTranslation(head.x, 2.7, head.z);
-    poleMesh.setMatrixAt(i, tmpMatrix);
-    tmpMatrix.makeTranslation(head.x, 5.6, head.z);
-    redMesh.setMatrixAt(i, tmpMatrix);
-    tmpMatrix.makeTranslation(head.x, 5.0, head.z);
-    greenMesh.setMatrixAt(i, tmpMatrix);
-    lightHeads.push({ x: head.gx, z: head.gz, index: i, offset: head.offset });
-  });
-  poleMesh.instanceMatrix.needsUpdate = true;
-  redMesh.instanceMatrix.needsUpdate = true;
-  greenMesh.instanceMatrix.needsUpdate = true;
-  game.scene.add(poleMesh);
-  game.scene.add(redMesh);
-  game.scene.add(greenMesh);
+  return Object.keys(weights)[0];
+}
 
-  function lightIsGreen(x, z) {
-    const head = lightHeads.reduce((best, h) => {
-      const d = dist2(x, z, h.x, h.z);
-      return !best || d < best.d ? { h, d } : best;
-    }, null);
-    if (!head || head.d > 60) return true;
-    const phase = (lightTime + head.h.offset) % LIGHT_CYCLE;
-    return phase < 12;
+export function createTraffic(deps) {
+  const { city, vehicles, physics } = deps;
+  const rng = mulberry32(20261119);
+
+  function assignRoute(v) {
+    const dest = city.randomRoadPoint(rng);
+    v.route = city.route(v.x, v.z, dest.x, dest.z);
+    v.routeIdx = 0;
+    v.cruise = v.def.topSpeed * (0.5 + rng() * 0.15);
   }
 
-  function pickType(random) {
-    // Supercars stay rare: a 4% roll, split across the class, instead
-    // of a bag weight that would flood the streets with them.
-    if (random() < 0.04) {
-      return SUPERCAR_TYPES[Math.floor(random() * SUPERCAR_TYPES.length)];
+  function spawnAll() {
+    for (let i = 0; i < TRAFFIC_COUNT; i++) {
+      const p = city.randomRoadPoint(rng);
+      let type = pickWeighted(rng, TRAFFIC_WEIGHTS);
+      if (rng() < SUPERCAR_TRAFFIC_CHANCE) type = SUPERCAR_TYPES[Math.floor(rng() * SUPERCAR_TYPES.length)];
+      const v = vehicles.makeVehicle(type, p.x, p.z, rng() * Math.PI * 2, { traffic: true });
+      assignRoute(v);
     }
-    const bag = [];
-    for (const [type, w] of Object.entries(TRAFFIC_WEIGHTS)) {
-      for (let i = 0; i < w; i += 1) bag.push(type);
-    }
-    return bag[Math.floor(random() * bag.length)] || 'komodo';
   }
 
-  function spawnCar() {
-    const angle = Math.random() * Math.PI * 2;
-    const radius = 70 + Math.random() * 70;
-    const px = game.player.x + Math.cos(angle) * radius;
-    const pz = game.player.z + Math.sin(angle) * radius;
-    const rp = game.roadgraph.nearestRoadPoint(px, pz);
-    if (game.physics.inWater(rp.x, rp.z)) return;
-    const target = game.roadgraph.randomNode(Math.random, rp.x, rp.z, 200, 900);
-    const route = game.roadgraph.route(rp.x, rp.z, target.x, target.z);
-    if (route.length < 2) return;
-    const vehicle = game.vehicles.spawn(pickType(Math.random), rp.x, rp.z, rp.heading, { driver: 'traffic' });
-    if (!vehicle) return;
-    managed.push({ vehicle, route, leg: 1, stuckTimer: 0, reverseTimer: 0, desiredSpeed: 9 + Math.random() * 4, pullover: false });
-  }
-
-  function obstacleAhead(car, lookAhead) {
-    const v = car.vehicle;
-    const fwd = { x: Math.sin(v.heading), z: Math.cos(v.heading) };
-    for (const other of game.vehicles.list) {
-      if (other === v || other.wrecked) continue;
-      const dx = other.x - v.x;
-      const dz = other.z - v.z;
-      const along = dx * fwd.x + dz * fwd.z;
-      const side = Math.abs(dx * fwd.z - dz * fwd.x);
-      if (along > 0 && along < lookAhead && side < 2.6) return true;
-    }
-    for (const w of game.pedestrians.walkers) {
-      if (w.state === 'dead') continue;
-      const dx = w.x - v.x;
-      const dz = w.z - v.z;
-      const along = dx * fwd.x + dz * fwd.z;
-      const side = Math.abs(dx * fwd.z - dz * fwd.x);
-      if (along > 0 && along < lookAhead * 0.7 && side < 2.2) return true;
-    }
-    if (!game.player.vehicle) {
-      const dx = game.player.x - v.x;
-      const dz = game.player.z - v.z;
-      const along = dx * fwd.x + dz * fwd.z;
-      const side = Math.abs(dx * fwd.z - dz * fwd.x);
-      if (along > 0 && along < lookAhead * 0.7 && side < 2.2) return true;
-    }
-    return false;
-  }
-
-  function update(dt) {
-    lightTime += dt;
-    for (const head of lightHeads) {
-      const phase = (lightTime + head.offset) % LIGHT_CYCLE;
-      const green = phase < 12;
-      redMesh.setColorAt(head.index, tmpColor.set(green ? 0x330d0d : 0xff2222));
-      greenMesh.setColorAt(head.index, tmpColor.set(green ? 0x22cc44 : 0x0d330d));
-    }
-    if (redMesh.instanceColor) redMesh.instanceColor.needsUpdate = true;
-    if (greenMesh.instanceColor) greenMesh.instanceColor.needsUpdate = true;
-    const hour = game.weather.hours;
-    const dayFactor = hour >= 7 && hour <= 19 ? 1 : hour >= 5 && hour <= 22 ? 0.6 : 0.3;
-    const weatherFactor = game.weather.current === 'storm' ? 0.5 : game.weather.current === 'rain' ? 0.7 : 1;
-    const cap = Math.floor(game.quality.trafficCap * dayFactor * weatherFactor);
-    spawnTimer -= dt;
-    if (managed.length < cap && spawnTimer <= 0) {
-      spawnTimer = 0.6;
-      spawnCar();
-    }
-    const sirenNear = game.wanted.stars >= 1;
-    for (let i = managed.length - 1; i >= 0; i -= 1) {
-      const car = managed[i];
-      const v = car.vehicle;
-      if (v.wrecked || v.driver !== 'traffic') {
-        managed.splice(i, 1);
-        continue;
+  /** One traffic car for one step: follow its route, yield ahead. */
+  function driveOne(v, dt, playerPos) {
+    if (!v.route || v.routeIdx >= v.route.length) {
+      const dx = v.x - playerPos.x;
+      const dz = v.z - playerPos.z;
+      if (dx * dx + dz * dz < 120 * 120) {
+        const p = city.randomRoadPoint(rng);
+        v.x = p.x; v.z = p.z; v.speed = 0;
       }
-      if (dist2(v.x, v.z, game.player.x, game.player.z) > 180) {
-        game.vehicles.remove(v);
-        managed.splice(i, 1);
-        continue;
+      assignRoute(v);
+      return;
+    }
+    const target = v.route[v.routeIdx];
+    const dx = target.x - v.x;
+    const dz = target.z - v.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 6) { v.routeIdx += 1; return; }
+    const wantHeading = Math.atan2(dx, dz);
+    let dh = wantHeading - v.heading;
+    while (dh > Math.PI) dh -= Math.PI * 2;
+    while (dh < -Math.PI) dh += Math.PI * 2;
+    const steer = Math.max(-1, Math.min(1, dh * 1.6));
+    // Slow down if a car is close ahead.
+    let blocked = false;
+    for (const o of vehicles.vehicles) {
+      if (o === v || o.wrecked) continue;
+      const ox = o.x - v.x;
+      const oz = o.z - v.z;
+      const od = Math.hypot(ox, oz);
+      if (od < 12) {
+        const ahead = (ox * Math.sin(v.heading) + oz * Math.cos(v.heading)) / Math.max(od, 0.001);
+        if (ahead > 0.7) { blocked = true; break; }
       }
-      // Route following: pure pursuit of the next route point.
-      const target = car.route[car.leg];
-      if (!target || dist2(v.x, v.z, target.x, target.z) < 8) {
-        car.leg += 1;
-        if (car.leg >= car.route.length) {
-          const next = game.roadgraph.randomNode(Math.random, v.x, v.z, 200, 900);
-          car.route = game.roadgraph.route(v.x, v.z, next.x, next.z);
-          car.leg = 1;
+    }
+    const before = { x: v.x, z: v.z };
+    physics.drive(v, { throttle: blocked ? 0 : 1, steer, handbrake: false }, dt, 1, vehicles.vehicles);
+    v.slip = 0; // traffic never drifts
+    // A car wedged against a wall never recovers on its own: the wall
+    // bounce pins its speed near 0 (so the old `speed > 1` test never
+    // fired) and it has no turn authority standing still. Measure
+    // progress, not speed: if full throttle moves it ~nowhere for 4 s,
+    // re-route from here — to its mission destination when it has one —
+    // and point it down the new route so it drives away from the wall
+    // instead of back into it.
+    const moved = Math.hypot(v.x - before.x, v.z - before.z);
+    if (!blocked && moved < 0.005) {
+      v.stuck += dt;
+      if (v.stuck > 4) {
+        if (v.missionDest) {
+          const reroute = city.route(v.x, v.z, v.missionDest.x, v.missionDest.z);
+          if (reroute && reroute.length > 0) { v.route = reroute; v.routeIdx = 0; }
+        } else {
+          assignRoute(v);
         }
-        continue;
-      }
-      const wantHeading = Math.atan2(target.x - v.x, target.z - v.z);
-      const headingError = ((wantHeading - v.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-      let throttle = 1;
-      let brake = false;
-      // Red light: stop at the intersection line when the light is red
-      // and the next node is an intersection within reach.
-      const nodeNear = game.roadgraph.nearestNode(v.x, v.z);
-      const node = game.roadgraph.nodePosition(nodeNear);
-      const nodeDist = dist2(v.x, v.z, node.x, node.z);
-      const approachingNode = nodeDist < 14 && dist2(target.x, target.z, node.x, node.z) < 2;
-      if (approachingNode && !lightIsGreen(node.x, node.z) && v.speed < 12) brake = true;
-      if (obstacleAhead(car, 10 + v.speed * 0.7)) brake = true;
-      // Sirens: pull to the edge and stop.
-      const policeClose = sirenNear && game.police.units.some((u) => u.vehicle && dist2(u.vehicle.x, u.vehicle.z, v.x, v.z) < 45);
-      car.pullover = policeClose;
-      if (car.pullover) brake = true;
-      if (car.reverseTimer > 0) {
-        car.reverseTimer -= dt;
-        throttle = -0.6;
-      } else if (brake) {
-        throttle = v.speed > 0.5 ? -1 : 0;
-      } else if (v.speed > car.desiredSpeed) {
-        throttle = 0;
-      }
-      const steer = clamp(headingError * 1.6, -1, 1);
-      const gripScale = game.weather.gripMultiplier();
-      const collision = game.physics.stepVehicle(v, v.def, { throttle, steer, handbrake: false }, dt, gripScale);
-      if (collision && collision.speed > 4) {
-        game.vehicles.damage(v, collision.speed * 1.2, v.x, v.z);
-        game.particles.sparks(v.x, 0.8, v.z, 5);
-      }
-      // Stuck recovery: back up briefly, then reroute.
-      if (Math.abs(v.speed) < 0.6 && throttle > 0 && !brake) {
-        car.stuckTimer += dt;
-        if (car.stuckTimer > 3.5) {
-          car.stuckTimer = 0;
-          car.reverseTimer = 1.2;
-          const next = game.roadgraph.randomNode(Math.random, v.x, v.z, 150, 800);
-          car.route = game.roadgraph.route(v.x, v.z, next.x, next.z);
-          car.leg = 1;
+        if (v.route && v.route.length > 0) {
+          v.heading = Math.atan2(v.route[0].x - v.x, v.route[0].z - v.z);
         }
-      } else {
-        car.stuckTimer = 0;
+        v.stuck = 0;
       }
-      if (car.pullover) {
-        // Edge toward the roadside while stopped.
-        const rp = game.roadgraph.nearestRoadPoint(v.x, v.z);
-        const sideX = v.x - rp.x;
-        const sideZ = v.z - rp.z;
-        const sideLen = Math.hypot(sideX, sideZ) || 1;
-        v.x += (sideX / sideLen) * dt * 1.2;
-        v.z += (sideZ / sideLen) * dt * 1.2;
-      }
+    } else {
+      v.stuck = 0;
     }
   }
 
-  function reset() {
-    for (const car of managed) {
-      if (car.vehicle.driver === 'traffic') game.vehicles.remove(car.vehicle);
+  function update(dt, playerPos) {
+    for (const v of vehicles.vehicles) {
+      if (v.traffic && !v.wrecked) driveOne(v, dt, playerPos);
     }
-    managed.length = 0;
   }
 
-  return { update, reset, managed, lightIsGreen };
+  return {
+    spawnAll,
+    assignRoute,
+    driveOne,
+    update,
+    get count() { return TRAFFIC_COUNT; },
+  };
 }

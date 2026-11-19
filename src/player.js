@@ -1,414 +1,442 @@
-// Rook Calloway: walking, running, jumping, driving, entering and
-// leaving cars, carjacking, health and armor. Movement on foot is
-// camera-relative by construction — forward input moves along the
-// camera's forward, so walking forward always moves away from the lens.
+// player.js — Rook Calloway on foot, rewritten in phase 2.
+//
+// Walk 5.0 m/s, run 8.5 m/s while Shift or the hold-to-run touch button
+// is held (F2). The player starts with fists AND a P9 Sidearm with ammo
+// (F1): the gun is obtainable and obvious from the first second, and a
+// visible weapon mesh sits in the right hand in third person, changing
+// with the equipped weapon. The heavy weapons arrive through
+// registerWeapon() — combat.js registers KR-9 / Iron-12 / VK-7 — and
+// firing itself is delegated to the handler combat.js installs; this
+// module keeps a minimal vehicle-only fallback so the gun still works
+// if combat is ever absent. Armor absorbs 60% of incoming damage;
+// health only returns through medkits, street food, or sleeping.
 
-import { ARMOR, WEAPONS, weaponById } from '../data/weaponsData.js';
-import { clamp, dampAngle, dist2, forwardOf } from './utils.js';
-import { animateWalker, attachWeaponMesh, buildWalkerMesh } from './pedestrians.js';
+import * as THREE from '../vendor/three.min.js';
+import { box, mergeGeoms, stdMaterial } from './geo.js';
 
-const WALK_SPEED = 5;
-const RUN_SPEED = 8.5;
+export const WALK_SPEED = 5.0;
+export const RUN_SPEED = 8.5;
+export const PLAYER_RADIUS = 0.55;
+export const ARMOR_ABSORB = 0.6;
 
-export function createPlayer(game) {
-  const parts = buildWalkerMesh(0x7a2f22, 0xd9a77c, 0x2a2018, 0x2a2e35);
-  parts.group.position.set(0, 0, 0);
-  game.scene.add(parts.group);
+/** Weapon table. Phase 2 adds KR-9 / Iron-12 / VK-7 via registerWeapon. */
+export const WEAPONS = {
+  fists: {
+    id: 'fists', name: { en: 'Fists', id: 'Tinju' }, kind: 'melee',
+    damage: 15, range: 2.0, auto: false, reloadTime: 0, price: 0,
+    ammoPrice: 0, ammoPack: 0, magSize: Infinity, fireInterval: 0.45,
+  },
+  p9: {
+    id: 'p9', name: { en: 'P9 Sidearm', id: 'P9 Sidearm' }, kind: 'pistol',
+    damage: 25, range: 40, auto: false, reloadTime: 1.1, price: 150,
+    ammoPrice: 20, ammoPack: 24, magSize: 12, fireInterval: 0.22,
+  },
+};
 
-  const player = {
-    x: 0, z: 0, y: 0, vy: 0, heading: Math.PI, speed: 0,
-    hp: 100, maxHp: 100, armor: 0, armorTier: 'none',
-    vehicle: null, entering: null, exiting: false, enterTimer: 0,
-    walkPhase: 0, moving: 0, aiming: false, stagger: 0,
-    weapons: {}, currentWeapon: 'fists', medkits: 1,
-    lastDamageAt: -99, lastCombatAt: -99, stepTimer: 0, skidTimer: 0,
-    lightsOn: false, dead: false, parts,
+export function registerWeapon(def) {
+  WEAPONS[def.id] = def;
+}
+
+export function weaponName(def, lang) {
+  return def.name[lang] || def.name.en;
+}
+
+/** Weapon meshes, built from a parts table per weapon (F1). */
+const WEAPON_PARTS = {
+  p9: [
+    [0.34, 0.09, 0.06, 0x1c1c20, 0.12, 0, 0],
+    [0.1, 0.16, 0.06, 0x6a4a2a, 0.0, -0.1, 0],
+    [0.1, 0.06, 0.06, 0x6a6f76, 0.3, 0.02, 0],
+    [0.06, 0.06, 0.06, 0x6a6f76, 0.24, 0.06, 0],
+    [0.36, 0.02, 0.065, 0x8a8f96, 0.12, 0.055, 0],
+  ],
+  kr9: [
+    [0.55, 0.09, 0.07, 0x1c1c20, 0.1, 0, 0],
+    [0.08, 0.2, 0.06, 0x1c1c20, -0.08, -0.1, 0],
+    [0.2, 0.07, 0.06, 0x6a6f76, 0.38, 0, 0],
+    [0.3, 0.06, 0.05, 0x6a4a2a, -0.28, -0.02, 0],
+  ],
+  iron12: [
+    [0.62, 0.11, 0.08, 0x1c1c20, 0.12, 0, 0],
+    [0.34, 0.08, 0.07, 0x6a6f76, 0.32, -0.01, 0],
+    [0.08, 0.18, 0.06, 0x6a4a2a, -0.14, -0.1, 0],
+    [0.22, 0.07, 0.06, 0x6a4a2a, -0.3, -0.02, 0],
+  ],
+  vk7: [
+    [0.72, 0.1, 0.07, 0x1c1c20, 0.1, 0, 0],
+    [0.08, 0.2, 0.06, 0x1c1c20, -0.05, -0.1, 0],
+    [0.24, 0.06, 0.05, 0x6a6f76, 0.48, 0, 0],
+    [0.06, 0.1, 0.06, 0x6a6f76, 0.18, 0.09, 0],
+    [0.3, 0.07, 0.06, 0x6a4a2a, -0.3, -0.02, 0],
+  ],
+};
+
+function buildWeaponMesh(weaponId) {
+  const parts = WEAPON_PARTS[weaponId];
+  if (!parts) return null; // fists: no mesh — bare hands
+  return mergeGeoms(parts.map(([w, h, d, c, x, y, z]) => box(w, h, d, c, x, y, z)));
+}
+
+/** Low-poly Rook: jacket, head, limbs. Limbs swing while walking. */
+function buildPlayerMesh() {
+  const skin = 0xc89878;
+  const jacket = 0x3a3f4a;
+  const pants = 0x2a2d33;
+  const body = new THREE.Group();
+  const bodyMesh = new THREE.Mesh(mergeGeoms([
+    box(0.55, 0.7, 0.32, jacket, 0, 1.15, 0),
+    box(0.56, 0.1, 0.33, 0x222222, 0, 0.82, 0),
+    box(0.34, 0.34, 0.32, skin, 0, 1.68, 0),
+    box(0.36, 0.1, 0.34, 0x1a1a1a, 0, 1.86, 0),
+    box(0.2, 0.62, 0.2, jacket, 0.36, 1.15, 0),
+    box(0.2, 0.62, 0.2, pants, -0.16, 0.42, 0),
+    box(0.2, 0.62, 0.2, pants, 0.16, 0.42, 0),
+  ]), stdMaterial());
+  bodyMesh.castShadow = true;
+  body.add(bodyMesh);
+  // Right arm is separate: it holds the weapon and aims with the camera.
+  // Body-local -X is the character's right side (forward = (sin h, cos h)).
+  const arm = new THREE.Group();
+  const armMesh = new THREE.Mesh(mergeGeoms([
+    box(0.2, 0.62, 0.2, jacket, 0, -0.31, 0),
+    box(0.18, 0.18, 0.18, skin, 0, -0.66, 0),
+  ]), stdMaterial());
+  armMesh.castShadow = true;
+  arm.add(armMesh);
+  arm.position.set(-0.36, 1.46, 0);
+  body.add(arm);
+  // Weapon anchor at the right hand.
+  const hand = new THREE.Group();
+  hand.position.set(0, -0.68, 0.06);
+  arm.add(hand);
+  return { body, arm, hand };
+}
+
+export function createPlayer(scene, city, vehicles, bus) {
+  const { body, arm, hand } = buildPlayerMesh();
+  scene.add(body);
+  const weaponMat = stdMaterial({ roughness: 0.4, metalness: 0.5 });
+  let weaponMesh = null;
+  let fireHandler = null;
+
+  const state = {
+    x: -452,
+    z: -372,
+    heading: 0.6,
+    health: 100,
+    armor: 0,
+    speed: 0,
+    inVehicle: false,
+    vehicle: null,
+    entering: 0, // >0 while the 0.6 s enter animation runs
+    exiting: 0,
+    weapons: { fists: { owned: true, ammo: Infinity, reserve: 0, mag: Infinity } },
+    currentWeapon: 'p9',
+    reloading: 0,
+    walkPhase: 0,
+    aim: false,
   };
 
-  function giveWeapon(id, withAmmo) {
-    const def = weaponById(id);
-    if (!player.weapons[id]) {
-      player.weapons[id] = { mag: def.magSize, reserve: withAmmo ? def.ammoPack * 2 : 0 };
-    } else if (withAmmo) {
-      player.weapons[id].reserve += def.ammoPack * 2;
+  // New game starts with the P9 Sidearm equipped, 12 in the mag + 48 in
+  // reserve (F1). The notice is shown by the HUD in main.js.
+  state.weapons.p9 = { owned: true, ammo: 12, reserve: 48, mag: 12 };
+  state.currentWeapon = 'p9';
+
+  const muzzleWorld = new THREE.Vector3();
+  const rayDir = new THREE.Vector3();
+  let lastShotAt = -10;
+
+  /** Minimal fallback fire (vehicles + walls only). Combat installs the
+   *  full handler; this keeps the gun working if it ever does not. */
+  function fallbackFire(camera, now) {
+    const def = currentWeaponDef();
+    if (!def || now - lastShotAt < def.fireInterval) return false;
+    if (state.reloading > 0) return false;
+    const w = state.weapons[state.currentWeapon];
+    if (def.kind !== 'melee' && w.ammo <= 0) { reload(); return false; }
+    lastShotAt = now;
+    if (def.kind !== 'melee') w.ammo -= 1;
+    hand.getWorldPosition(muzzleWorld);
+    camera.getWorldDirection(rayDir);
+    let bestT = def.range;
+    let bestVehicle = null;
+    for (const v of vehicles.vehicles) {
+      if (v.wrecked) continue;
+      const cx = v.x - muzzleWorld.x;
+      const cz = v.z - muzzleWorld.z;
+      const cy = 0.9 - muzzleWorld.y;
+      const t = cx * rayDir.x + cy * rayDir.y + cz * rayDir.z;
+      if (t < 0 || t > bestT) continue;
+      const px = muzzleWorld.x + rayDir.x * t;
+      const pz = muzzleWorld.z + rayDir.z * t;
+      const py = muzzleWorld.y + rayDir.y * t;
+      if (Math.hypot(px - v.x, py - 0.9, pz - v.z) < 1.5) { bestT = t; bestVehicle = v; }
     }
-    return player.weapons[id];
+    const wallT = city.raycastBuildings(muzzleWorld.x, muzzleWorld.y, muzzleWorld.z, rayDir.x, rayDir.y, rayDir.z, def.range);
+    const endT = Math.min(bestT, wallT);
+    const end = new THREE.Vector3(
+      muzzleWorld.x + rayDir.x * endT,
+      muzzleWorld.y + rayDir.y * endT,
+      muzzleWorld.z + rayDir.z * endT,
+    );
+    if (bestVehicle && bestT <= wallT) {
+      vehicles.damage(bestVehicle, def.damage, 'shot');
+      bus.emit('hit', { x: end.x, z: end.z, weapon: def.id, vehicle: bestVehicle });
+    } else if (wallT < Infinity) {
+      bus.emit('impact', { x: end.x, y: end.y, z: end.z, weapon: def.id });
+    }
+    bus.emit('shot', { weapon: def.id, hit: !!bestVehicle, muzzle: { x: muzzleWorld.x, y: muzzleWorld.y, z: muzzleWorld.z } });
+    return true;
   }
 
-  function resetWeapons() {
-    player.weapons = { fists: { mag: 0, reserve: 0 } };
-    giveWeapon('p9', true);
-    // A new game starts with the pistol EQUIPPED and visible in hand,
-    // not buried behind fists: the gun must be obvious from the first
-    // second of play.
-    player.currentWeapon = 'p9';
+  function tryFire(camera, now) {
+    if (state.inVehicle || state.entering > 0) return false;
+    if (fireHandler) return fireHandler(camera, now);
+    return fallbackFire(camera, now);
   }
 
-  let lastWeaponMesh = null;
   function syncWeaponMesh() {
-    if (player.currentWeapon !== lastWeaponMesh) {
-      lastWeaponMesh = player.currentWeapon;
-      attachWeaponMesh(parts, player.currentWeapon);
+    if (weaponMesh) {
+      hand.remove(weaponMesh);
+      weaponMesh.geometry.dispose();
+      weaponMesh = null;
+    }
+    const geom = buildWeaponMesh(state.currentWeapon);
+    if (geom) {
+      weaponMesh = new THREE.Mesh(geom, weaponMat);
+      weaponMesh.castShadow = true;
+      // The mesh is built with its barrel along +X; rotate it onto the
+      // arm's pointing direction (-Y in hand space) so the gun points
+      // where the arm points — down at the side while walking, forward
+      // while aiming — instead of sideways. Scaled up a touch: a
+      // true-scale pistol vanishes at third-person distance.
+      weaponMesh.rotation.z = -Math.PI / 2;
+      weaponMesh.scale.setScalar(1.45);
+      hand.add(weaponMesh);
     }
   }
+  syncWeaponMesh();
 
-  function hurt(amount, source) {
-    if (player.dead || game.ui.isMenuOpen()) return;
-    const absorb = ARMOR[player.armorTier] ? ARMOR[player.armorTier].absorb : 0;
-    let remaining = amount;
-    if (player.armor > 0 && absorb > 0) {
-      const absorbed = Math.min(player.armor, amount * absorb);
-      player.armor -= absorbed;
-      remaining = amount - absorbed;
-      if (player.armor <= 0) player.armorTier = 'none';
+  function switchWeapon(id) {
+    if (!state.weapons[id] || !state.weapons[id].owned) return false;
+    if (state.currentWeapon === id) return false;
+    state.currentWeapon = id;
+    state.reloading = 0;
+    syncWeaponMesh();
+    bus.emit('weapon-switched', { weapon: id });
+    return true;
+  }
+
+  function giveWeapon(id, ammo = 0) {
+    const def = WEAPONS[id];
+    if (!def) return false;
+    if (!state.weapons[id]) {
+      state.weapons[id] = { owned: true, ammo: 0, reserve: 0, mag: def.magSize };
     }
-    player.hp -= remaining;
-    game.progress.stats.hpLost = (game.progress.stats.hpLost || 0) + remaining;
-    player.lastDamageAt = game.time;
-    player.lastCombatAt = game.time;
-    game.hud.flashDamage();
-    game.cameraRig.addTrauma(clamp(amount / 60, 0.15, 0.6));
-    if (player.hp <= 0) {
-      player.hp = 0;
-      player.dead = true;
-      game.wanted.onPlayerDeath(source);
-    }
+    state.weapons[id].owned = true;
+    state.weapons[id].reserve += ammo;
+    return true;
+  }
+
+  function currentWeaponDef() {
+    return WEAPONS[state.currentWeapon];
+  }
+
+  function reload() {
+    const def = currentWeaponDef();
+    const w = state.weapons[state.currentWeapon];
+    if (!def || def.kind === 'melee') return false;
+    if (state.reloading > 0 || w.ammo >= def.magSize || w.reserve <= 0) return false;
+    state.reloading = def.reloadTime;
+    return true;
+  }
+
+  function finishReload() {
+    const def = currentWeaponDef();
+    const w = state.weapons[state.currentWeapon];
+    const need = def.magSize - w.ammo;
+    const take = Math.min(need, w.reserve);
+    w.ammo += take;
+    w.reserve -= take;
   }
 
   function heal(amount) {
-    const before = player.hp;
-    player.hp = Math.min(player.maxHp, player.hp + amount);
-    if (player.hp > before) game.particles.heal(player.x, 1.2, player.z);
-    return player.hp - before;
+    state.health = Math.min(100, state.health + amount);
   }
 
-  function useMedkit() {
-    if (player.medkits <= 0) {
-      game.hud.notify(game.lang('noMedkit'), 'bad');
-      return false;
+  function addArmor(amount) {
+    state.armor = Math.min(100, state.armor + amount);
+  }
+
+  /** Enter the nearest car (0.6 s) or carjack a moving one. */
+  function tryEnter() {
+    if (state.inVehicle || state.entering > 0) return false;
+    const v = vehicles.nearestVehicle(state.x, state.z, 4.5);
+    if (!v) return false;
+    state.entering = 0.6;
+    state.pendingVehicle = v;
+    if (v.traffic && Math.abs(v.speed) > 1) {
+      // Carjack: the driver bails and the car stops for the player.
+      v.traffic = false;
+      v.speed = 0;
+      bus.emit('carjack', { vehicle: v });
     }
-    if (game.time - player.lastCombatAt < 5) {
-      game.hud.notify(game.lang('combatLock'), 'bad');
-      return false;
-    }
-    if (player.hp >= player.maxHp) return false;
-    player.medkits -= 1;
-    heal(50);
-    game.audio.playSfx('pickup', player.x, player.z);
     return true;
-  }
-
-  function nearestVehicle(radius) {
-    return game.vehicles.nearest(player.x, player.z, radius, (v) => !v.burning);
-  }
-
-  function tryEnterVehicle() {
-    if (player.vehicle || player.entering || player.exiting || player.dead) return false;
-    const vehicle = nearestVehicle(4.2);
-    if (!vehicle) return false;
-    if (vehicle.driver === 'traffic') {
-      // Carjack: the driver flees on foot, witnesses may call it in.
-      vehicle.driver = null;
-      vehicle.parked = false;
-      const driver = game.pedestrians.spawnWalker(vehicle.x + 2, vehicle.z + 2);
-      game.pedestrians.startFlee(driver, vehicle.x, vehicle.z);
-      game.events.emit('crime', { kind: 'carjack', x: vehicle.x, z: vehicle.z, heat: 12 });
-      game.progress.stats.carsStolen += 1;
-      game.audio.playSfx('door', vehicle.x, vehicle.z);
-    }
-    player.entering = vehicle;
-    player.enterTimer = 0.6;
-    game.audio.playSfx('door', vehicle.x, vehicle.z);
-    return true;
-  }
-
-  function completeEnter() {
-    const vehicle = player.entering;
-    player.entering = null;
-    player.vehicle = vehicle;
-    vehicle.driver = 'player';
-    vehicle.parked = false;
-    player.x = vehicle.x;
-    player.z = vehicle.z;
-    player.heading = vehicle.heading;
-    parts.group.visible = false;
-    // THE camera rule: snap behind the car's heading on entry.
-    game.cameraRig.snapBehind(vehicle.heading);
-    game.events.emit('enteredVehicle', { vehicle });
   }
 
   function exitVehicle() {
-    const vehicle = player.vehicle;
-    if (!vehicle || player.exiting) return;
-    const speed = vehicle.speed;
-    player.vehicle = null;
-    vehicle.driver = null;
-    const fwd = forwardOf(vehicle.heading);
-    player.x = vehicle.x - fwd.z * 2.2;
-    player.z = vehicle.z + fwd.x * 2.2;
-    player.y = 0;
-    player.vy = 0;
-    player.heading = vehicle.heading;
-    player.exiting = true;
-    player.enterTimer = 0.4;
-    parts.group.visible = true;
-    game.audio.playSfx('door', player.x, player.z);
-    if (speed > 8) {
-      hurt(speed * 0.9, 'bail');
-      player.stagger = 0.8;
-    }
-    game.events.emit('exitedVehicle', { vehicle });
+    if (!state.inVehicle || state.exiting > 0) return;
+    state.exiting = 0.4;
+    state.pendingExit = true;
   }
 
-  function updateOnFoot(dt, input, pressed) {
-    player.aiming = input.aimHeld() || input.fireHeld();
-    if (player.stagger > 0) player.stagger -= dt;
-    const axis = input.axis();
-    const camFwd = game.cameraRig.forward();
-    const camRight = { x: camFwd.z, z: -camFwd.x };
-    let wishX = camFwd.x * axis.y + camRight.x * axis.x;
-    let wishZ = camFwd.z * axis.y + camRight.z * axis.x;
-    const wishLen = Math.hypot(wishX, wishZ);
-    if (wishLen > 0.01) {
-      wishX /= wishLen;
-      wishZ /= wishLen;
-    }
-    const speed = input.sprint() ? RUN_SPEED : WALK_SPEED;
-    const slowed = player.stagger > 0 ? 0.4 : 1;
-    const moving = wishLen > 0.1;
-    if (moving) {
-      game.physics.moveWalker(player, wishX, wishZ, speed * slowed, dt);
-      const targetHeading = player.aiming ? game.cameraRig.yaw : Math.atan2(wishX, wishZ);
-      player.heading = dampAngle(player.heading, targetHeading, player.aiming ? 14 : 9, dt);
-      player.speed = speed * slowed;
-      player.moving = 1;
-    } else {
-      player.speed = 0;
-      player.moving = 0;
-      if (player.aiming) player.heading = dampAngle(player.heading, game.cameraRig.yaw, 14, dt);
-    }
-    // Jump: real vertical velocity, gravity, landing thump. On foot,
-    // Space jumps; in a vehicle the same key is the handbrake.
-    if (pressed.has('jump') && player.y <= 0) {
-      player.vy = 6.5;
-    }
-    if (player.y > 0 || player.vy !== 0) {
-      player.vy -= 20 * dt;
-      player.y += player.vy * dt;
-      if (player.y <= 0) {
-        player.y = 0;
-        player.vy = 0;
-        game.particles.dust(player.x, 0.2, player.z);
-      }
-    }
-    if (moving && player.y <= 0) {
-      player.stepTimer -= dt * player.speed;
-      if (player.stepTimer <= 0) {
-        player.stepTimer = 2.4;
-        game.audio.playSfx('step', player.x, player.z);
-      }
-    }
-    player.walkPhase += dt * (moving ? (input.sprint() ? 11 : 7.5) : 0);
-    animateWalker(parts, player.walkPhase, player.moving, player.aiming, false);
-    parts.group.position.set(player.x, player.y, player.z);
-    parts.group.rotation.y = player.heading;
-    game.progress.stats.distanceWalked += player.speed * dt * (moving ? 1 : 0);
+  function turnToward(want, rate, dt) {
+    let dh = want - state.heading;
+    while (dh > Math.PI) dh -= Math.PI * 2;
+    while (dh < -Math.PI) dh += Math.PI * 2;
+    state.heading += dh * Math.min(1, rate * dt);
   }
 
-  function updateDriving(dt, input, pressed) {
-    const vehicle = player.vehicle;
-    const drive = {
-      throttle: input.throttle(),
-      steer: input.steer(),
-      handbrake: input.handbrake(),
-    };
-    const gripScale = game.weather.gripMultiplier();
-    const collision = game.physics.stepVehicle(vehicle, vehicle.def, drive, dt, gripScale);
-    player.x = vehicle.x;
-    player.z = vehicle.z;
-    player.y = vehicle.y;
-    player.heading = vehicle.heading;
-    player.speed = vehicle.speed;
-    if (collision) {
-      const dmg = collision.speed * 1.6;
-      if (dmg > 4) {
-        game.vehicles.damage(vehicle, dmg, vehicle.x, vehicle.z);
-        game.cameraRig.addTrauma(clamp(collision.speed / 28, 0.15, 0.7));
-        game.particles.sparks(vehicle.x, 0.8, vehicle.z, 10);
-        game.audio.playSfx('crash', vehicle.x, vehicle.z);
-        game.events.emit('crash', { x: vehicle.x, z: vehicle.z, speed: collision.speed, vehicle, other: null });
-        if (collision.speed > 8) {
-          game.events.emit('crime', { kind: 'property', x: vehicle.x, z: vehicle.z, heat: 8 });
-        }
-        if (vehicle.def && vehicle.integrity <= 0) {
-          // Burning car: the player must get out before it blows.
-          game.hud.notify(game.lang('carBurning'), 'bad');
+  function update(dt, input, camYaw) {
+    // --- entering / exiting vehicle (real timed transitions) ---
+    if (state.entering > 0) {
+      state.entering -= dt;
+      if (state.entering <= 0) {
+        const v = state.pendingVehicle;
+        state.pendingVehicle = null;
+        if (v && !v.wrecked) {
+          state.inVehicle = true;
+          state.vehicle = v;
+          v.traffic = false;
+          v.parked = false;
+          vehicles.setPlayerVehicle(v);
+          bus.emit('entered-vehicle', { vehicle: v });
         }
       }
-    }
-    // Stunt ramps launch the car.
-    if (vehicle.y <= 0 && vehicle.vy === 0) {
-      for (const jump of game.contracts.stuntJumps) {
-        if (dist2(vehicle.x, vehicle.z, jump.x, jump.z) < 5 && vehicle.speed > 12) {
-          const headingDiff = Math.abs(((vehicle.heading - jump.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
-          if (headingDiff < 0.7) {
-            vehicle.vy = vehicle.speed * 0.42 * jump.ramp;
-            vehicle.airStart = { x: vehicle.x, z: vehicle.z };
-            vehicle.airTime = 0;
-            game.audio.playSfx('crash', vehicle.x, vehicle.z);
-          }
-        }
-      }
-    }
-    if (vehicle.airStart && vehicle.y <= 0 && vehicle.vy === 0 && vehicle.airTime > 0.3) {
-      const airDist = dist2(vehicle.airStart.x, vehicle.airStart.z, vehicle.x, vehicle.z);
-      game.contracts.recordStunt(vehicle.airTime, airDist, vehicle.x, vehicle.z);
-      vehicle.airStart = null;
-      vehicle.airTime = 0;
-    }
-    // Drift smoke + skid marks + skid audio.
-    game.audio.setSkid(vehicle.drifting, vehicle.slip / 10);
-    if (vehicle.drifting) {
-      player.skidTimer -= dt;
-      const fwd = forwardOf(vehicle.heading);
-      const backX = vehicle.x - fwd.x * vehicle.def.length * 0.3;
-      const backZ = vehicle.z - fwd.z * vehicle.def.length * 0.3;
-      game.particles.tireSmoke(backX, 0.3, backZ, vehicle.vx, vehicle.vz);
-      if (player.skidTimer <= 0) {
-        player.skidTimer = 0.09;
-        game.particles.skid(backX - fwd.z * 0.7, backZ + fwd.x * 0.7, vehicle.heading);
-        game.particles.skid(backX + fwd.z * 0.7, backZ - fwd.x * 0.7, vehicle.heading);
-      }
-    }
-    if (pressed.has('horn')) game.audio.playSfx('horn', vehicle.x, vehicle.z);
-    if (pressed.has('lights')) {
-      player.lightsOn = !player.lightsOn;
-      game.hud.notify(player.lightsOn ? 'Headlights on' : 'Headlights off', 'good');
-    }
-    game.progress.stats.distanceDriven += vehicle.speed * dt;
-    // A burning car ejects its driver with the explosion.
-    if (vehicle.burning && vehicle.explodeTimer <= 0.4 && player.vehicle === vehicle) {
-      exitVehicle();
-    }
-    if (vehicle.wrecked && player.vehicle === vehicle) {
-      player.vehicle = null;
-      parts.group.visible = true;
-    }
-  }
-
-  function update(dt, input, pressed) {
-    if (player.dead) return;
-    if (player.entering) {
-      player.enterTimer -= dt;
-      if (player.enterTimer <= 0) completeEnter();
       return;
     }
-    if (player.exiting) {
-      player.enterTimer -= dt;
-      if (player.enterTimer <= 0) player.exiting = false;
-    }
-    if (pressed.has('enter')) {
-      if (player.vehicle) exitVehicle();
-      else tryEnterVehicle();
-    }
-    if (player.vehicle) updateDriving(dt, input, pressed);
-    else updateOnFoot(dt, input, pressed);
-    if (pressed.has('medkit')) useMedkit();
-    // Weapon switching.
-    for (let slot = 1; slot <= 5; slot += 1) {
-      if (pressed.has(`weapon${slot}`)) {
-        const def = WEAPONS[slot - 1];
-        if (player.weapons[def.id]) {
-          player.currentWeapon = def.id;
-          game.audio.playSfx('click');
+    if (state.exiting > 0) {
+      state.exiting -= dt;
+      if (state.exiting <= 0 && state.pendingExit) {
+        state.pendingExit = false;
+        const v = state.vehicle;
+        state.inVehicle = false;
+        state.vehicle = null;
+        vehicles.setPlayerVehicle(null);
+        if (v) {
+          // Step out to the driver's side.
+          state.x = v.x + Math.cos(v.heading) * 2.2;
+          state.z = v.z - Math.sin(v.heading) * 2.2;
+          state.heading = v.heading;
+          v.speed = 0;
         }
+        bus.emit('exited-vehicle', { vehicle: v });
       }
+      return;
     }
-    const wheel = input.takeWheel();
-    if (wheel !== 0) {
-      const owned = WEAPONS.filter((w) => player.weapons[w.id]);
-      if (owned.length > 1) {
-        const idx = owned.findIndex((w) => w.id === player.currentWeapon);
-        const next = owned[(idx + (wheel > 0 ? 1 : -1) + owned.length) % owned.length];
-        player.currentWeapon = next.id;
-        game.audio.playSfx('click');
-      }
+
+    if (state.inVehicle) return; // driving is handled by vehicles.update
+
+    // --- on foot ---
+    if (state.reloading > 0) {
+      state.reloading -= dt;
+      if (state.reloading <= 0) finishReload();
     }
-    syncWeaponMesh();
+
+    const sprint = input.sprint;
+    const topSpeed = sprint ? RUN_SPEED : WALK_SPEED;
+    const mx = input.moveX;
+    const mz = input.moveY;
+    const mag = Math.hypot(mx, mz);
+    state.aim = input.aim;
+
+    if (mag > 0.01) {
+      // Movement is relative to the camera yaw: forward always walks
+      // away from the camera (camera regression rule, SPEC §2.4).
+      const nx = mx / Math.max(mag, 1);
+      const nz = mz / Math.max(mag, 1);
+      const sin = Math.sin(camYaw);
+      const cos = Math.cos(camYaw);
+      const wx = nz * sin - nx * cos;
+      const wz = nz * cos + nx * sin;
+      state.speed += (topSpeed - state.speed) * Math.min(1, 10 * dt);
+      const res = city.resolveCircle(state.x + wx * state.speed * dt, state.z + wz * state.speed * dt, PLAYER_RADIUS);
+      state.x = res.x;
+      state.z = res.z;
+      turnToward(state.aim ? camYaw : Math.atan2(wx, wz), 12, dt);
+      state.walkPhase += dt * state.speed * 1.6;
+    } else {
+      state.speed -= state.speed * Math.min(1, 10 * dt);
+      if (state.aim) turnToward(camYaw, 12, dt);
+    }
+
+    // World bounds: the island ends at the sea.
+    state.x = Math.max(-595, Math.min(595, state.x));
+    state.z = Math.max(-595, Math.min(595, state.z));
+
+    // --- visuals ---
+    body.position.set(state.x, 0, state.z);
+    body.rotation.y = state.heading;
+    const swing = Math.sin(state.walkPhase) * Math.min(1, state.speed / WALK_SPEED) * 0.5;
+    body.rotation.z = swing * 0.06;
+    // Right arm: points forward while aiming, relaxed otherwise.
+    arm.rotation.x = state.aim ? -Math.PI / 2 + 0.15 : swing * 0.4;
+    arm.rotation.z = state.aim ? 0 : -0.12;
+    body.visible = true;
   }
 
-  function teleport(x, z, heading) {
-    if (player.vehicle) {
-      player.vehicle.x = x;
-      player.vehicle.z = z;
-      player.vehicle.heading = heading;
-      player.vehicle.vx = 0;
-      player.vehicle.vz = 0;
+  function position() {
+    // While driving, the player IS the car: every system that asks
+    // where the player is (missions, wanted, minimap, contracts) must
+    // get the car's position, not the frozen spot where they got in.
+    if (state.inVehicle && state.vehicle) {
+      return { x: state.vehicle.x, z: state.vehicle.z };
     }
-    player.x = x;
-    player.z = z;
-    player.y = 0;
-    player.vy = 0;
-    player.heading = heading;
-    parts.group.position.set(x, 0, z);
-    parts.group.rotation.y = heading;
+    return { x: state.x, z: state.z };
   }
 
-  function reset(spawn) {
-    player.hp = player.maxHp;
-    player.armor = 0;
-    player.armorTier = 'none';
-    player.vehicle = null;
-    player.entering = null;
-    player.exiting = false;
-    player.dead = false;
-    player.medkits = 1;
-    player.stagger = 0;
-    resetWeapons();
-    syncWeaponMesh();
-    teleport(spawn.x, spawn.z, spawn.heading);
-    parts.group.visible = true;
+  function teleport(x, z, heading = 0) {
+    // A teleport is absolute: cancel a pending enter/exit first. The
+    // exit completes 0.4 s later and overwrites the position with the
+    // car's location — without this, teleporting out of a moving car
+    // silently puts the player back at the car, and a WASTED respawn
+    // while driving never moved the player at all.
+    state.entering = 0;
+    state.pendingVehicle = null;
+    state.exiting = 0;
+    state.pendingExit = false;
+    if (state.inVehicle) {
+      state.inVehicle = false;
+      state.vehicle = null;
+      vehicles.setPlayerVehicle(null);
+    }
+    state.x = x;
+    state.z = z;
+    state.heading = heading;
+    body.position.set(x, 0, z);
+    body.rotation.y = heading;
   }
-
-  resetWeapons();
-  syncWeaponMesh();
 
   return {
-    ...player,
-    get x() { return player.x; },
-    set x(v) { player.x = v; },
-    get z() { return player.z; },
-    set z(v) { player.z = v; },
-    get y() { return player.y; },
-    set y(v) { player.y = v; },
-    get heading() { return player.heading; },
-    set heading(v) { player.heading = v; },
-    get hp() { return player.hp; },
-    set hp(v) { player.hp = v; },
-    get armor() { return player.armor; },
-    set armor(v) { player.armor = v; },
-    get armorTier() { return player.armorTier; },
-    set armorTier(v) { player.armorTier = v; },
-    get vehicle() { return player.vehicle; },
-    set vehicle(v) { player.vehicle = v; },
-    get dead() { return player.dead; },
-    set dead(v) { player.dead = v; },
-    get speed() { return player.speed; },
-    get currentWeapon() { return player.currentWeapon; },
-    set currentWeapon(v) { player.currentWeapon = v; },
-    get weapons() { return player.weapons; },
-    set weapons(v) { player.weapons = v; },
-    get medkits() { return player.medkits; },
-    set medkits(v) { player.medkits = v; },
-    get aiming() { return player.aiming; },
-    get lightsOn() { return player.lightsOn; },
-    set lightsOn(v) { player.lightsOn = v; },
-    get parts() { return parts; },
-    get lastCombatAt() { return player.lastCombatAt; },
-    set lastCombatAt(v) { player.lastCombatAt = v; },
-    get lastDamageAt() { return player.lastDamageAt; },
-    giveWeapon, hurt, heal, useMedkit, tryEnterVehicle, exitVehicle,
-    nearestVehicle, update, teleport, reset,
-    state: player,
+    state,
+    body,
+    update,
+    tryEnter,
+    exitVehicle,
+    switchWeapon,
+    giveWeapon,
+    reload,
+    tryFire,
+    currentWeaponDef,
+    position,
+    teleport,
+    syncWeaponMesh,
+    heal,
+    addArmor,
+    setFireHandler(fn) { fireHandler = fn; },
+    muzzleWorld(out) {
+      hand.getWorldPosition(out || muzzleWorld);
+      return out || muzzleWorld;
+    },
   };
 }

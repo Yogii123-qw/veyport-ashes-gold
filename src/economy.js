@@ -1,206 +1,233 @@
-// Money in, money out, every transaction on the books. The ledger in
-// the pause menu is the audit trail: no cash appears from nowhere and
-// no charge happens without a line saying why. Shops, fines, repairs
-// and upgrades all pass through here.
+// economy.js — money in, money out, all of it audited, rewritten in phase 2.
+//
+// SPEC §3.4: no money appears from thin air. Every transaction is a
+// ledger entry the player can audit in the pause menu. The core is the
+// phase-1 set — cash, the ledger, the armory (ammo / medkit / armor),
+// the garage (store / retrieve / respray), the chop shop (sell a stolen
+// car for its condition-adjusted price) — plus the phase-2 additions:
+// free resprays granted by mission M3, a chop price for a garaged
+// record (the pause menu sells stored cars without spawning them), and
+// the safehouse upgrade. Missions and contracts pay through earn();
+// wanted fines pay through spend(). New shops register through
+// registerShopItem() — nothing is hardcoded into the HUD.
+//
+// One real change from phase 1: the respray no longer disposes and
+// rebuilds geometry. Vehicle body geometry is cached per (type, colour)
+// in vehicles.js, so a repaint is a cache lookup — faster, and it can
+// never free a geometry another car is still using.
 
-import { ARMOR, ITEMS, WEAPONS, weaponById, weaponName } from '../data/weaponsData.js';
-import { VEHICLES } from '../data/vehiclesData.js';
-import { formatClock, formatMoney } from './utils.js';
+import { WEAPONS } from './player.js';
+import { VEHICLES, vehicleName } from './vehiclesData.js';
 
-export const PRICES = {
-  respray: 300,
-  bribe: 500,
-  garageUpgrade: 1000,
-  armoryUpgrade: 800,
-};
+export const STARTING_CASH = 500;
+const GARAGE_CAPACITY = 4;
+const RESPRAY_PRICE = 300;
 
-export function createEconomy(game) {
-  function ledger(label, amount) {
-    const entry = {
-      time: formatClock(game.weather.hours),
+export function createEconomy(bus) {
+  const state = {
+    cash: STARTING_CASH,
+    ledger: [],
+    garage: [], // stored vehicle records {type, color, integrity, name}
+    freeResprays: 0, // granted by mission M3; each one waives RESPRAY_PRICE
+    safehouseLevel: 0,
+  };
+
+  let playerRef = null;
+  let vehiclesRef = null;
+
+  function bind(player, vehicles) {
+    playerRef = player;
+    vehiclesRef = vehicles;
+  }
+
+  function record(label, amount) {
+    state.ledger.unshift({
+      time: new Date().toISOString(),
       label,
       amount,
-      balance: game.progress.money,
-    };
-    game.progress.ledger.unshift(entry);
-    if (game.progress.ledger.length > 200) game.progress.ledger.length = 200;
-    game.events.emit('money', { amount, label });
+      balance: state.cash,
+    });
+    if (state.ledger.length > 200) state.ledger.length = 200;
+    bus.emit('ledger', { label, amount, balance: state.cash });
   }
 
   function earn(amount, label) {
-    if (amount <= 0) return;
-    game.progress.money += amount;
-    game.progress.stats.moneyEarned += amount;
-    ledger(label, amount);
-    game.hud.notify(`+${formatMoney(amount)} · ${label}`, 'good');
-    game.audio.playSfx('cash', game.player.x, game.player.z);
+    if (amount <= 0) return false;
+    state.cash += amount;
+    record(label, amount);
+    bus.emit('money', { delta: amount, cash: state.cash, label });
+    return true;
   }
 
   function spend(amount, label) {
     if (amount <= 0) return true;
-    if (game.progress.money < amount) {
-      game.hud.notify(game.lang('noMoney'), 'bad');
-      return false;
-    }
-    game.progress.money -= amount;
-    game.progress.stats.moneySpent += amount;
-    ledger(label, -amount);
+    if (state.cash < amount) return false;
+    state.cash -= amount;
+    record(label, -amount);
+    bus.emit('money', { delta: -amount, cash: state.cash, label });
     return true;
   }
 
-  function spendForced(amount, label) {
-    const paid = Math.min(amount, game.progress.money);
-    game.progress.money -= paid;
-    game.progress.stats.moneySpent += paid;
-    ledger(label, -paid);
-    return paid;
-  }
-
-  function buyWeapon(id) {
-    const def = weaponById(id);
-    if (game.player.weapons[id]) return { ok: false, reason: 'owned' };
-    if (!spend(def.price, weaponName(def, game.settings.language))) return { ok: false, reason: 'money' };
-    game.player.giveWeapon(id, true);
-    return { ok: true };
-  }
-
-  function buyAmmo(id) {
-    const def = weaponById(id);
-    if (!game.player.weapons[id]) return { ok: false, reason: 'noweapon' };
-    if (!spend(def.ammoPrice, `${game.settings.language === 'id' ? 'Amunisi' : 'Ammo'} ${weaponName(def, game.settings.language)}`)) return { ok: false, reason: 'money' };
-    game.player.weapons[id].reserve += def.ammoPack;
-    return { ok: true };
-  }
-
-  function buyArmor(tier) {
-    const info = ARMOR[tier];
-    if (!info || tier === 'none') return { ok: false, reason: 'bad' };
-    if (tier === 'heavy' && !game.progress.flags.heavyArmor) return { ok: false, reason: 'locked' };
-    if (!spend(info.price, info.name[game.settings.language] || info.name.en)) return { ok: false, reason: 'money' };
-    game.player.armor = 100;
-    game.player.armorTier = tier;
-    return { ok: true };
-  }
-
-  function buyMedkit() {
-    if (game.player.medkits >= 3) return { ok: false, reason: 'full' };
-    if (!spend(ITEMS.medkit.price, ITEMS.medkit.name[game.settings.language] || ITEMS.medkit.name.en)) return { ok: false, reason: 'money' };
-    game.player.medkits += 1;
-    return { ok: true };
-  }
-
-  function buyFood() {
-    if (game.player.hp >= game.player.maxHp) return { ok: false, reason: 'full' };
-    if (!spend(ITEMS.food.price, ITEMS.food.name[game.settings.language] || ITEMS.food.name.en)) return { ok: false, reason: 'money' };
-    game.player.heal(ITEMS.food.heal);
-    return { ok: true };
-  }
-
-  function respray(vehicle, colorHex) {
-    if (!vehicle) return { ok: false, reason: 'nocar' };
-    if (game.progress.flags.freeRespray > 0) {
-      game.progress.flags.freeRespray -= 1;
-    } else if (!spend(PRICES.respray, game.settings.language === 'id' ? 'Cat ulang' : 'Respray')) {
-      return { ok: false, reason: 'money' };
-    }
-    vehicle.color = colorHex;
-    vehicle.bodyMat.color.set(colorHex);
-    game.wanted.clearWanted();
-    game.hud.notify(game.lang('resprayDone'), 'good');
-    return { ok: true };
-  }
-
-  function bribe() {
-    if (game.wanted.stars < 1 || game.wanted.stars > 2) return { ok: false, reason: 'stars' };
-    if (!spend(PRICES.bribe, game.settings.language === 'id' ? 'Suap kontak' : 'Street bribe')) return { ok: false, reason: 'money' };
-    game.wanted.clearWanted();
-    game.hud.notify(game.lang('bribeDone'), 'good');
-    return { ok: true };
-  }
-
-  function sellVehicle(vehicle) {
-    const value = game.vehicles.sellValue(vehicle);
-    if (value <= 0) return { ok: false, reason: 'nosale' };
-    earn(value, `${game.settings.language === 'id' ? 'Jual' : 'Sold'} ${vehicle.def.name[game.settings.language] || vehicle.def.name.en} (${vehicle.plate})`);
-    if (game.player.vehicle === vehicle) game.player.exitVehicle();
-    game.vehicles.remove(vehicle);
-    game.hud.notify(game.lang('soldVehicle'), 'good');
-    return { ok: true, value };
-  }
-
-  function buyGarageUpgrade() {
-    if (game.progress.flags.garageUpgraded) return { ok: false, reason: 'owned' };
-    if (!spend(PRICES.garageUpgrade, game.settings.language === 'id' ? 'Upgrade garasi' : 'Garage upgrade')) return { ok: false, reason: 'money' };
-    game.progress.flags.garageUpgraded = true;
-    return { ok: true };
-  }
-
-  function buyArmoryUpgrade() {
-    if (game.progress.flags.armoryUpgraded) return { ok: false, reason: 'owned' };
-    if (!spend(PRICES.armoryUpgrade, game.settings.language === 'id' ? 'Gudang senjata' : 'Armory')) return { ok: false, reason: 'money' };
-    game.progress.flags.armoryUpgraded = true;
-    return { ok: true };
-  }
-
-  function garageCapacity() {
-    return game.progress.flags.garageUpgraded ? 4 : 2;
-  }
-
-  function storeVehicle(vehicle) {
-    if (game.progress.garage.length >= garageCapacity()) {
-      game.hud.notify(game.lang('garageFull'), 'bad');
-      return false;
-    }
-    if (vehicle.def.police || vehicle.def.missionOnly) return false;
-    game.progress.garage.push({
-      defId: vehicle.defId, color: vehicle.color, integrity: vehicle.integrity, plate: vehicle.plate,
+  // ---- Shop catalog (phase 2 extends it via registerShopItem) ----
+  function buildCatalog() {
+    const items = [];
+    const add = (item) => items.push(item);
+    // Armory: ammo, medkit, armor.
+    add({
+      id: 'ammo-p9', shop: 'armory', name: { en: 'P9 ammo ×24', id: 'Amunisi P9 ×24' },
+      price: 20, canBuy: () => !!playerRef?.state.weapons.p9?.owned,
+      apply: () => { playerRef.state.weapons.p9.reserve += 24; },
     });
-    if (game.player.vehicle === vehicle) game.player.exitVehicle();
-    game.vehicles.remove(vehicle);
-    game.hud.notify(game.lang('vehicleStored'), 'good');
-    game.audio.playSfx('door', game.player.x, game.player.z);
-    return true;
+    for (const wId of ['kr9', 'iron12', 'vk7']) {
+      const def = WEAPONS[wId];
+      if (!def) continue;
+      add({
+        id: `ammo-${wId}`, shop: 'armory',
+        name: { en: `${def.name.en} ammo ×${def.ammoPack}`, id: `Amunisi ${def.name.en} ×${def.ammoPack}` },
+        price: def.ammoPrice, canBuy: () => !!playerRef?.state.weapons[wId]?.owned,
+        apply: () => { playerRef.state.weapons[wId].reserve += def.ammoPack; },
+      });
+    }
+    add({
+      id: 'medkit', shop: 'armory', name: { en: 'Medkit (+50 HP)', id: 'Medkit (+50 HP)' },
+      price: 100, canBuy: () => playerRef && playerRef.state.health < 100,
+      apply: () => { playerRef.state.health = Math.min(100, playerRef.state.health + 50); },
+    });
+    add({
+      id: 'armor', shop: 'armory', name: { en: 'Body armor (+50)', id: 'Rompi antipeluru (+50)' },
+      price: 150, canBuy: () => playerRef && playerRef.state.armor < 100,
+      apply: () => { playerRef.state.armor = Math.min(100, playerRef.state.armor + 50); },
+    });
+    // Garage: respray — free while a granted respray is banked.
+    add({
+      id: 'respray', shop: 'garage', name: { en: 'Respray (new paint)', id: 'Respray (cat baru)' },
+      price: RESPRAY_PRICE, canBuy: () => !!vehiclesRef?.getPlayerVehicle(),
+      apply: () => {
+        const v = vehiclesRef.getPlayerVehicle();
+        const palette = v.def.colors;
+        let next = palette[Math.floor(Math.random() * palette.length)];
+        if (palette.length > 1) {
+          while (next === v.color) next = palette[Math.floor(Math.random() * palette.length)];
+        }
+        v.color = next;
+        // Colour lives in the merged vertices; the geometry cache makes
+        // a repaint a swap to the cached geometry of the new colour.
+        v.body.geometry = vehiclesRef.bodyGeometry(v.def, next);
+      },
+    });
+    // Safehouse upgrade: +1 garage slot per level, up to 6 total.
+    add({
+      id: 'safehouse', shop: 'garage',
+      name: { en: 'Safehouse upgrade (+1 slot)', id: 'Upgrade safehouse (+1 slot)' },
+      price: 2000, canBuy: () => state.safehouseLevel < 2,
+      apply: () => { state.safehouseLevel += 1; },
+    });
+    return items;
+  }
+  const catalog = buildCatalog();
+
+  /** Mission M3 grants one free respray; the shop consumes it first. */
+  function grantFreeRespray() {
+    state.freeResprays += 1;
+  }
+
+  function registerShopItem(item) {
+    catalog.push(item);
+  }
+
+  function shopItems(shop) {
+    return catalog.filter((i) => i.shop === shop);
+  }
+
+  function buy(itemId) {
+    const item = catalog.find((i) => i.id === itemId);
+    if (!item) return { ok: false, reason: 'no-such-item' };
+    if (item.canBuy && !item.canBuy()) return { ok: false, reason: 'not-applicable' };
+    if (itemId === 'respray' && state.freeResprays > 0) {
+      state.freeResprays -= 1;
+      item.apply();
+      record('Free respray (mission reward)', 0);
+      return { ok: true, free: true };
+    }
+    if (!spend(item.price, `Bought ${item.name.en}`)) return { ok: false, reason: 'no-cash' };
+    item.apply();
+    return { ok: true };
+  }
+
+  // ---- Garage: keep cars between sessions (4 + safehouse levels) ----
+  function garageCapacity() {
+    return GARAGE_CAPACITY + state.safehouseLevel;
+  }
+
+  function storeCurrentVehicle() {
+    const v = vehiclesRef?.getPlayerVehicle();
+    if (!v) return { ok: false, reason: 'no-vehicle' };
+    if (state.garage.length >= garageCapacity()) return { ok: false, reason: 'garage-full' };
+    state.garage.push({
+      type: v.type, color: v.color,
+      integrity: Math.round(v.integrity),
+      name: vehicleName(v.def, 'en'),
+    });
+    vehiclesRef.removeVehicle(v);
+    record(`Stored ${vehicleName(v.def, 'en')} in garage`, 0);
+    return { ok: true };
   }
 
   function retrieveVehicle(index, x, z, heading) {
-    const entry = game.progress.garage[index];
-    if (!entry) return null;
-    // A stale entry (edited save, removed vehicle type) must never
-    // crash the spawn: drop it and tell the player, instead of dying.
-    if (!VEHICLES[entry.defId]) {
-      game.progress.garage.splice(index, 1);
-      game.hud.notify(game.lang('garageStale'), 'bad');
-      return null;
-    }
-    game.progress.garage.splice(index, 1);
-    return game.vehicles.spawn(entry.defId, x, z, heading, { color: entry.color, integrity: entry.integrity });
+    const rec = state.garage[index];
+    if (!rec) return null;
+    state.garage.splice(index, 1);
+    const v = vehiclesRef.makeVehicle(rec.type, x, z, heading, { color: rec.color });
+    v.integrity = Math.max(10, rec.integrity);
+    return v;
   }
 
-  function armoryRefill() {
-    if (!game.progress.flags.armoryUpgraded) return false;
-    const day = Math.floor(game.progress.stats.playSeconds / (18 * 60));
-    if (game.progress.flags.lastRefillDay === day) return false;
-    game.progress.flags.lastRefillDay = day;
-    for (const weapon of WEAPONS) {
-      const slot = game.player.weapons[weapon.id];
-      if (slot && weapon.magSize > 0) slot.reserve = Math.max(slot.reserve, weapon.ammoPack);
-    }
-    return true;
+  // ---- Chop shop: sell a car for its condition-adjusted price ----
+  function conditionPrice(sell, integrity, maxIntegrity) {
+    if (sell <= 0) return 0;
+    return Math.round(sell * Math.max(0.15, integrity / maxIntegrity));
   }
 
-  function sleep() {
-    game.weather.advanceHours(8);
-    game.player.hp = game.player.maxHp;
-    game.player.armor = game.player.armorTier === 'none' ? 0 : 100;
-    game.hud.notify(game.lang('safehouseSlept'), 'good');
-    game.save.autosave('sleep');
+  function sellVehicle(v) {
+    if (!v || v.def.sell <= 0) return { ok: false, reason: 'not-sellable' };
+    const price = conditionPrice(v.def.sell, v.integrity, v.maxIntegrity);
+    earn(price, `Sold ${vehicleName(v.def, 'en')} to chop shop`);
+    vehiclesRef.removeVehicle(v);
+    return { ok: true, price };
+  }
+
+  function chopPrice(v) {
+    if (!v) return 0;
+    return conditionPrice(v.def.sell, v.integrity, v.maxIntegrity);
+  }
+
+  /** Chop price for a garaged record (no vehicle spawned to price it).
+   *  Records store integrity in durability points, so the condition
+   *  divisor is the vehicle's durability, not 100. */
+  function garageChopPrice(rec) {
+    if (!rec) return 0;
+    const def = VEHICLES[rec.type];
+    if (!def) return 0;
+    return conditionPrice(def.sell, rec.integrity, def.durability);
   }
 
   return {
-    get money() { return game.progress.money; },
-    earn, spend, spendForced, ledger,
-    buyWeapon, buyAmmo, buyArmor, buyMedkit, buyFood,
-    respray, bribe, sellVehicle, buyGarageUpgrade, buyArmoryUpgrade,
-    garageCapacity, storeVehicle, retrieveVehicle, armoryRefill, sleep,
+    state,
+    bind,
+    earn,
+    spend,
+    buy,
+    shopItems,
+    registerShopItem,
+    grantFreeRespray,
+    garageCapacity,
+    storeCurrentVehicle,
+    retrieveVehicle,
+    sellVehicle,
+    chopPrice,
+    garageChopPrice,
+    get cash() { return state.cash; },
+    get ledger() { return state.ledger; },
+    get garage() { return state.garage; },
   };
 }

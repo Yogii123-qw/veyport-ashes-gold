@@ -1,351 +1,340 @@
-// Walkers: the shared low-poly person every human in Veyport is built
-// from, plus the civilian crowd — sidewalk walkers who flee gunfire and
-// call the police when they watch a crime happen. Gang members and
-// officers reuse the walker factory with their own brains.
+// pedestrians.js — the people of Veyport.
+//
+// Walkers cross the sidewalks, cross at zebras, and run when they hear
+// gunfire. A witness who watches a crime phones the police after five
+// seconds — leave the area before the call completes and the heat never
+// lands (SPEC §3.2). Gang members hold territory: Harbormen in the Docks,
+// Foundry Kings in Foundry Row. They fight back when shot at or when a
+// mission puts them in the player's way. Nobody here is decoration:
+// every ped walks a real route, reacts to real events, and can be hurt.
 
-import * as THREE from 'three';
-import { clamp, dampAngle, dist2 } from './utils.js';
+import * as THREE from '../vendor/three.min.js';
+import { box, mergeGeoms, stdMaterial } from './geo.js';
 
-const torsoGeo = new THREE.BoxGeometry(0.52, 0.62, 0.3);
-const headGeo = new THREE.BoxGeometry(0.34, 0.36, 0.32);
-const hairGeo = new THREE.BoxGeometry(0.36, 0.14, 0.34);
-const limbGeo = new THREE.BoxGeometry(0.16, 0.62, 0.16);
-const armGeo = new THREE.BoxGeometry(0.13, 0.56, 0.13);
-const legGeo = new THREE.BoxGeometry(0.17, 0.7, 0.17);
+const WALKER_COUNT = 26;
+const WALKER_SPEED = 1.4;
+const FLEE_SPEED = 4.2;
+const GANG_COLORS = {
+  harbormen: { jacket: 0x2a4a6a, pants: 0x222222, skin: 0xc89878 },
+  foundry: { jacket: 0x6a2a2a, pants: 0x2a2a2a, skin: 0xb88a68 },
+};
+const CIVILIAN_PALETTES = [
+  { jacket: 0x5a6a3a, pants: 0x2a2d33, skin: 0xc89878 },
+  { jacket: 0x8a5a2a, pants: 0x3a3f4a, skin: 0x8a5a3a },
+  { jacket: 0x3a5a7a, pants: 0x222222, skin: 0xd8a888 },
+  { jacket: 0x6a3a5a, pants: 0x2a2d33, skin: 0xc89878 },
+  { jacket: 0x2a7a5a, pants: 0x4a4a48, skin: 0xa87a58 },
+];
 
-// ---- In-hand weapons: one shared unit box, scaled per part, so a
-// held gun costs a few meshes and no extra geometry. Gun-local space:
-// the barrel runs along -y (away from the shoulder), the magazine
-// hangs toward -z and the sight sits toward +z — when the arm rises
-// to aim, -y points downrange, the magazine hangs down and the sight
-// rides on top, exactly as a held gun should.
-const unitBox = new THREE.BoxGeometry(1, 1, 1);
-const gunMetal = new THREE.MeshStandardMaterial({ color: 0x23262b, roughness: 0.4, metalness: 0.7 });
-const gunDark = new THREE.MeshStandardMaterial({ color: 0x3a3a3a, roughness: 0.6, metalness: 0.4 });
-const gunGrip = new THREE.MeshStandardMaterial({ color: 0x2e2118, roughness: 0.9 });
-const gunWood = new THREE.MeshStandardMaterial({ color: 0x6a4a2a, roughness: 0.8 });
-
-function gunPart(mat, w, h, d, x, y, z, rx = 0) {
-  const mesh = new THREE.Mesh(unitBox, mat);
-  mesh.scale.set(w, h, d);
-  mesh.position.set(x, y, z);
-  if (rx) mesh.rotation.x = rx;
-  return mesh;
-}
-
-export function buildWeaponMesh(weaponId) {
+/** One low-poly person. Armed peds carry a visible gun in the hand. */
+export function buildPersonMesh(opts = {}) {
+  const c = opts.colors || CIVILIAN_PALETTES[0];
+  const parts = [
+    box(0.5, 0.62, 0.3, c.jacket, 0, 1.08, 0),
+    box(0.3, 0.3, 0.28, c.skin, 0, 1.58, 0),
+    box(0.32, 0.09, 0.3, 0x1a1a1a, 0, 1.74, 0),
+    box(0.17, 0.55, 0.17, c.jacket, 0.32, 1.08, 0),
+    box(0.17, 0.55, 0.17, c.jacket, -0.32, 1.08, 0),
+    box(0.18, 0.55, 0.18, c.pants, -0.14, 0.38, 0),
+    box(0.18, 0.55, 0.18, c.pants, 0.14, 0.38, 0),
+  ];
   const group = new THREE.Group();
-  if (weaponId === 'p9') {
-    group.add(gunPart(gunMetal, 0.07, 0.3, 0.09, 0, -0.13, 0));
-    group.add(gunPart(gunGrip, 0.06, 0.13, 0.1, 0, 0.03, -0.05, 0.35));
-    group.add(gunPart(gunDark, 0.03, 0.06, 0.04, 0, -0.28, 0.01));
-  } else if (weaponId === 'kr9') {
-    group.add(gunPart(gunMetal, 0.08, 0.34, 0.1, 0, -0.12, 0));
-    group.add(gunPart(gunDark, 0.05, 0.18, 0.05, 0, -0.36, 0));
-    group.add(gunPart(gunDark, 0.06, 0.1, 0.16, 0, -0.08, -0.08));
-    group.add(gunPart(gunGrip, 0.05, 0.16, 0.08, 0, 0.1, 0.02));
-  } else if (weaponId === 'iron12') {
-    group.add(gunPart(gunMetal, 0.09, 0.5, 0.09, 0, -0.28, 0.01));
-    group.add(gunPart(gunWood, 0.1, 0.2, 0.08, 0, -0.25, -0.06));
-    group.add(gunPart(gunWood, 0.07, 0.26, 0.09, 0, 0.08, -0.02, 0.2));
-    group.add(gunPart(gunDark, 0.06, 0.08, 0.07, 0, -0.02, 0.03));
-  } else if (weaponId === 'vk7') {
-    group.add(gunPart(gunMetal, 0.08, 0.4, 0.11, 0, -0.14, 0));
-    group.add(gunPart(gunDark, 0.045, 0.3, 0.045, 0, -0.48, 0.01));
-    group.add(gunPart(gunDark, 0.06, 0.1, 0.18, 0, -0.1, -0.09, -0.2));
-    group.add(gunPart(gunGrip, 0.06, 0.2, 0.09, 0, 0.12, -0.01));
-    group.add(gunPart(gunDark, 0.03, 0.08, 0.05, 0, -0.12, 0.09));
-  } else {
-    return null;
+  const body = new THREE.Mesh(mergeGeoms(parts), stdMaterial());
+  body.castShadow = true;
+  group.add(body);
+  if (opts.armed) {
+    const gun = new THREE.Mesh(
+      mergeGeoms([
+        box(0.3, 0.07, 0.05, 0x1c1c20, 0.1, 0, 0),
+        box(0.08, 0.14, 0.05, 0x6a4a2a, 0, -0.09, 0),
+      ]),
+      stdMaterial({ roughness: 0.4, metalness: 0.5 }),
+    );
+    gun.position.set(-0.32, 0.82, 0.12);
+    group.add(gun);
   }
   return group;
 }
 
-/** Swap the weapon in a walker's right hand (fists = empty hand). */
-export function attachWeaponMesh(parts, weaponId) {
-  if (parts.weaponMesh) {
-    parts.armR.remove(parts.weaponMesh);
-    parts.weaponMesh = null;
-  }
-  if (!weaponId || weaponId === 'fists') return null;
-  const mesh = buildWeaponMesh(weaponId);
-  if (!mesh) return null;
-  mesh.position.set(0, -0.56, 0.08);
-  parts.armR.add(mesh);
-  parts.weaponMesh = mesh;
-  return mesh;
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-export function buildWalkerMesh(coatColor, skinColor, hairColor, pantsColor) {
+export function createPedestrians(scene, city, bus, deps = {}) {
+  const rng = mulberry32(99173);
   const group = new THREE.Group();
-  const coatMat = new THREE.MeshStandardMaterial({ color: coatColor, roughness: 0.85 });
-  const skinMat = new THREE.MeshStandardMaterial({ color: skinColor, roughness: 0.7 });
-  const hairMat = new THREE.MeshStandardMaterial({ color: hairColor, roughness: 0.9 });
-  const pantsMat = new THREE.MeshStandardMaterial({ color: pantsColor || 0x2a2e35, roughness: 0.9 });
-  const torso = new THREE.Mesh(torsoGeo, coatMat);
-  torso.position.y = 1.18;
-  torso.castShadow = true;
-  group.add(torso);
-  const head = new THREE.Mesh(headGeo, skinMat);
-  head.position.y = 1.68;
-  head.castShadow = true;
-  group.add(head);
-  const hair = new THREE.Mesh(hairGeo, hairMat);
-  hair.position.y = 1.88;
-  group.add(hair);
-  const armL = new THREE.Group();
-  armL.position.set(-0.33, 1.44, 0);
-  const armLMesh = new THREE.Mesh(armGeo, coatMat);
-  armLMesh.position.y = -0.26;
-  armL.add(armLMesh);
-  group.add(armL);
-  const armR = new THREE.Group();
-  armR.position.set(0.33, 1.44, 0);
-  const armRMesh = new THREE.Mesh(armGeo, coatMat);
-  armRMesh.position.y = -0.26;
-  armR.add(armRMesh);
-  group.add(armR);
-  const legL = new THREE.Group();
-  legL.position.set(-0.14, 0.86, 0);
-  const legLMesh = new THREE.Mesh(legGeo, pantsMat);
-  legLMesh.position.y = -0.36;
-  legL.add(legLMesh);
-  group.add(legL);
-  const legR = new THREE.Group();
-  legR.position.set(0.14, 0.86, 0);
-  const legRMesh = new THREE.Mesh(legGeo, pantsMat);
-  legRMesh.position.y = -0.36;
-  legR.add(legRMesh);
-  group.add(legR);
-  return { group, torso, head, armL, armR, legL, legR, coatMat };
-}
+  group.name = 'pedestrians';
+  scene.add(group);
+  const peds = [];
+  let pedId = 1;
+  const damagePlayer = deps.damagePlayer || (() => {});
 
-export function animateWalker(parts, phase, moveAmount, aiming, phoning) {
-  const swing = Math.sin(phase) * 0.55 * moveAmount;
-  parts.legL.rotation.x = swing;
-  parts.legR.rotation.x = -swing;
-  if (phoning) {
-    parts.armR.rotation.x = -2.4;
-    parts.armL.rotation.x = -swing * 0.5;
-  } else if (aiming) {
-    parts.armR.rotation.x = -1.45;
-    parts.armL.rotation.x = -1.2;
-  } else {
-    parts.armL.rotation.x = -swing;
-    parts.armR.rotation.x = swing;
-  }
-}
-
-export function createPedestrians(game) {
-  const walkers = [];
-  let spawnTimer = 0;
-  const COATS = [0x7a4a3a, 0x3a5a7a, 0x5a6a3a, 0x8a7a5a, 0x4a4a5a, 0x9a8a6a, 0x2f4a4a, 0x6a3a4a];
-  const SKINS = [0xd9a77c, 0xc98d5e, 0x8a5a3c, 0xe0b58e, 0xa8764a];
-  const HAIRS = [0x2a2018, 0x1c1c1c, 0x6a4a2a, 0xd8d3c8, 0x4a2a1a];
-
-  function spawnWalker(x, z) {
-    const parts = buildWalkerMesh(
-      COATS[Math.floor(Math.random() * COATS.length)],
-      SKINS[Math.floor(Math.random() * SKINS.length)],
-      HAIRS[Math.floor(Math.random() * HAIRS.length)],
-    );
-    parts.group.position.set(x, 0, z);
-    game.scene.add(parts.group);
-    const walker = {
-      x, z, heading: Math.random() * Math.PI * 2, speed: 0, hp: 50, state: 'walk',
-      parts, walkPhase: Math.random() * 6, target: null, retarget: 0,
-      fleeTimer: 0, fleeFrom: null, witnessTimer: 0, deadTimer: 0, fallAngle: 0,
-      stepTimer: 0, kind: 'civilian',
+  function makePed(kind, x, z, opts = {}) {
+    const colors = opts.gang ? GANG_COLORS[opts.gang] : CIVILIAN_PALETTES[Math.floor(rng() * CIVILIAN_PALETTES.length)];
+    const mesh = buildPersonMesh({ colors, armed: !!opts.armed });
+    mesh.position.set(x, 0, z);
+    group.add(mesh);
+    const p = {
+      id: pedId++,
+      kind, // 'walker' | 'gang'
+      gang: opts.gang || null,
+      x, z,
+      heading: rng() * Math.PI * 2,
+      speed: 0,
+      health: opts.health || 100,
+      alive: true,
+      armed: !!opts.armed,
+      hostile: !!opts.hostile,
+      state: 'walk',
+      mesh,
+      route: null,
+      routeIdx: 0,
+      walkPhase: rng() * 6,
+      witnessTimer: -1,
+      witnessPos: null,
+      shootCooldown: 0,
+      deadTimer: 0,
+      despawn: 0,
     };
-    walkers.push(walker);
-    return walker;
+    peds.push(p);
+    return p;
   }
 
-  function pickSidewalkTarget(walker) {
-    const rp = game.roadgraph.nearestRoadPoint(walker.x + (Math.random() - 0.5) * 120, walker.z + (Math.random() - 0.5) * 120);
-    const side = Math.random() < 0.5 ? 1 : -1;
-    const perpX = Math.cos(rp.heading) * side;
-    const perpZ = -Math.sin(rp.heading) * side;
-    const tx = rp.x + perpX * 10.5;
-    const tz = rp.z + perpZ * 10.5;
-    if (game.physics.inWater(tx, tz)) return;
-    walker.target = { x: tx, z: tz };
+  function assignWalkRoute(p) {
+    const dest = city.randomRoadPoint(rng);
+    p.route = city.route(p.x, p.z, dest.x, dest.z);
+    p.routeIdx = 0;
   }
 
-  function hurt(walker, amount, byPlayer, headshot) {
-    if (walker.state === 'dead') return;
-    walker.hp -= amount;
-    if (walker.hp <= 0) {
-      walker.state = 'dead';
-      walker.deadTimer = 0;
-      walker.fallAngle = (Math.random() < 0.5 ? 1 : -1) * (Math.PI / 2);
-      game.events.emit('killed', { victim: walker, killer: byPlayer ? 'player' : 'npc', x: walker.x, z: walker.z, kind: 'civilian' });
-      if (byPlayer) {
-        game.events.emit('crime', { kind: 'kill', x: walker.x, z: walker.z, heat: 35 });
-        game.progress.stats.kills += 1;
-      }
-    } else if (byPlayer) {
-      startFlee(walker, game.player.x, game.player.z);
+  function spawnWalkers() {
+    for (let i = 0; i < WALKER_COUNT; i++) {
+      const pt = city.randomRoadPoint(rng);
+      const p = makePed('walker', pt.x, pt.z);
+      assignWalkRoute(p);
     }
   }
 
-  function startFlee(walker, fromX, fromZ) {
-    if (walker.state === 'dead') return;
-    walker.state = 'flee';
-    walker.fleeTimer = 4 + Math.random() * 2;
-    walker.fleeFrom = { x: fromX, z: fromZ };
-    walker.witnessTimer = 0;
+  /** A spawn point on open ground: inside a building a ped is
+   * unhittable (the wall blocks every shot while the ped inside can
+   * still shoot out, chance-based) and the defeat stage soft-locks.
+   * M3's guards spawned inside the chop shop and M6's inside the
+   * lighthouse — both defeat stages could never complete. Walk a ring
+   * of candidates out to 24 m and take the first point outside every
+   * collider (low curbs under 1 m don't count, same as resolveCircle).
+   * The guards end up in the forecourt, visible and hittable. */
+  function clearSpawn(x, z) {
+    const inside = (px, pz) => {
+      for (const b of city.colliders) {
+        if (b.height < 1) continue;
+        if (px >= b.x0 - 0.6 && px <= b.x1 + 0.6 && pz >= b.z0 - 0.6 && pz <= b.z1 + 0.6) return true;
+      }
+      return false;
+    };
+    if (!inside(x, z)) return { x, z };
+    for (const r of [4, 8, 12, 16, 20, 24]) {
+      for (let a = 0; a < 8; a++) {
+        const ang = (a / 8) * Math.PI * 2;
+        const px = x + Math.cos(ang) * r;
+        const pz = z + Math.sin(ang) * r;
+        if (!inside(px, pz)) return { x: px, z: pz };
+      }
+    }
+    return { x, z };
   }
 
-  function startWitness(walker) {
-    if (walker.state === 'dead' || walker.state === 'flee') return;
-    if (walker.witnessTimer > 0) return;
-    walker.state = 'witness';
-    walker.witnessTimer = 5;
-    game.hud.notify(game.lang('witness'), 'bad');
-    game.audio.playSfx('click', walker.x, walker.z);
+  /** Spawn armed gang members at a spot (missions + territory defence). */
+  function spawnGang(gang, x, z, count, opts = {}) {
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const spot = clearSpawn(x + (rng() - 0.5) * 6, z + (rng() - 0.5) * 6);
+      const p = makePed('gang', spot.x, spot.z, {
+        gang, armed: true, hostile: opts.hostile !== false, health: opts.health || 100,
+      });
+      p.state = opts.hostile === false ? 'walk' : 'fight';
+      out.push(p);
+    }
+    return out;
   }
 
-  game.events.on('gunshot', ({ x, z, shooter }) => {
-    for (const w of walkers) {
-      if (w.state === 'dead') continue;
-      const d = dist2(w.x, w.z, x, z);
-      if (d < 32) startFlee(w, x, z);
-      else if (d < 55 && shooter === 'player' && Math.random() < 0.5) startFlee(w, x, z);
-    }
-  });
-  game.events.on('explosion', ({ x, z }) => {
-    for (const w of walkers) {
-      if (w.state === 'dead') continue;
-      if (dist2(w.x, w.z, x, z) < 55) startFlee(w, x, z);
-    }
-  });
-  game.events.on('crime', ({ kind, x, z }) => {
-    if (kind === 'kill') return; // Killing is already loud; witnesses flee.
-    for (const w of walkers) {
-      if (w.state !== 'walk' && w.state !== 'idle') continue;
-      const d = dist2(w.x, w.z, x, z);
-      if (d < 25 && !game.physics.segmentBlocked(w.x, w.z, x, z)) startWitness(w);
-    }
-  });
-
-  function update(dt) {
-    // Density follows the clock: busy at midday, thin at 3 a.m.
-    const hour = game.weather.hours;
-    const dayFactor = hour >= 7 && hour <= 19 ? 1 : hour >= 5 && hour <= 22 ? 0.6 : 0.3;
-    const weatherFactor = game.weather.current === 'storm' ? 0.4 : game.weather.current === 'rain' ? 0.6 : 1;
-    const maxWalkers = Math.floor(game.quality.pedCap * dayFactor * weatherFactor);
-    spawnTimer -= dt;
-    if (walkers.length < maxWalkers && spawnTimer <= 0) {
-      spawnTimer = 0.5;
-      const angle = Math.random() * Math.PI * 2;
-      const radius = 60 + Math.random() * 60;
-      const x = game.player.x + Math.cos(angle) * radius;
-      const z = game.player.z + Math.sin(angle) * radius;
-      if (Math.abs(x) < 580 && Math.abs(z) < 580 && !game.physics.inWater(x, z) && !game.roadgraph.onRoad(x, z)) {
-        const w = spawnWalker(x, z);
-        pickSidewalkTarget(w);
-      }
-    }
-    for (let i = walkers.length - 1; i >= 0; i -= 1) {
-      const w = walkers[i];
-      if (w.state === 'dead') {
-        w.deadTimer += dt;
-        const target = w.fallAngle;
-        w.parts.group.rotation.x += (target - w.parts.group.rotation.x) * Math.min(1, dt * 6);
-        if (w.deadTimer > 20) {
-          game.scene.remove(w.parts.group);
-          walkers.splice(i, 1);
-        }
-        continue;
-      }
-      if (dist2(w.x, w.z, game.player.x, game.player.z) > 170) {
-        game.scene.remove(w.parts.group);
-        walkers.splice(i, 1);
-        continue;
-      }
-      let moving = 0;
-      if (w.state === 'flee') {
-        w.fleeTimer -= dt;
-        const away = Math.atan2(w.x - w.fleeFrom.x, w.z - w.fleeFrom.z);
-        w.heading = dampAngle(w.heading, away, 6, dt);
-        const moved = game.physics.moveWalker(w, Math.sin(w.heading), Math.cos(w.heading), 7.5, dt);
-        moving = moved.moved ? 1 : 0.3;
-        w.speed = 7.5;
-        if (w.fleeTimer <= 0) {
-          w.state = 'walk';
-          pickSidewalkTarget(w);
-        }
-      } else if (w.state === 'witness') {
-        w.witnessTimer -= dt;
-        w.heading = dampAngle(w.heading, Math.atan2(game.player.x - w.x, game.player.z - w.z), 5, dt);
-        w.speed = 0;
-        const dPlayer = dist2(w.x, w.z, game.player.x, game.player.z);
-        if (dPlayer > 40) {
-          w.state = 'walk';
-          w.witnessTimer = 0;
-          pickSidewalkTarget(w);
-        } else if (w.witnessTimer <= 0) {
-          w.state = 'walk';
-          w.witnessTimer = 0;
-          game.events.emit('alarm', { x: w.x, z: w.z, radius: 60 });
-          game.events.emit('crime', { kind: 'witnessed', x: game.player.x, z: game.player.z, heat: 14, silent: true });
-          pickSidewalkTarget(w);
-        }
-      } else {
-        w.retarget -= dt;
-        if (!w.target || w.retarget <= 0 || dist2(w.x, w.z, w.target.x, w.target.z) < 3) {
-          pickSidewalkTarget(w);
-          w.retarget = 14 + Math.random() * 10;
-        }
-        if (w.target) {
-          const want = Math.atan2(w.target.x - w.x, w.target.z - w.z);
-          w.heading = dampAngle(w.heading, want, 4, dt);
-          const moved = game.physics.moveWalker(w, Math.sin(w.heading), Math.cos(w.heading), 1.6, dt);
-          moving = moved.moved ? 0.6 : 0;
-          w.speed = 1.6;
-          if (!moved.moved) pickSidewalkTarget(w);
-        }
-      }
-      // Hit by a moving vehicle?
-      for (const vehicle of game.vehicles.list) {
-        if (vehicle.wrecked || vehicle.speed < 3) continue;
-        if (dist2(w.x, w.z, vehicle.x, vehicle.z) < 2.2) {
-          const byPlayer = vehicle === game.player.vehicle;
-          hurt(w, 60 + vehicle.speed * 2, byPlayer, false);
-          game.particles.dust(w.x, 1, w.z);
-          if (byPlayer) {
-            game.events.emit('crime', { kind: 'hitPed', x: w.x, z: w.z, heat: 25 });
-            game.cameraRig.addTrauma(0.35);
-          }
-          game.audio.playSfx('crash', w.x, w.z);
-          break;
-        }
-      }
-      w.walkPhase += dt * (w.state === 'flee' ? 11 : 5) * (moving > 0 ? 1 : 0);
-      animateWalker(w.parts, w.walkPhase, moving, false, w.state === 'witness');
-      w.parts.group.position.set(w.x, 0, w.z);
-      w.parts.group.rotation.y = w.heading;
-    }
-  }
-
-  function nearest(x, z, radius) {
+  function nearestPed(x, z, maxDist, aliveOnly = true) {
     let best = null;
-    let bestD = radius;
-    for (const w of walkers) {
-      if (w.state === 'dead') continue;
-      const d = dist2(x, z, w.x, w.z);
-      if (d < bestD) { bestD = d; best = w; }
+    let bestD = maxDist * maxDist;
+    for (const p of peds) {
+      if (aliveOnly && !p.alive) continue;
+      const dx = p.x - x;
+      const dz = p.z - z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 < bestD) { bestD = d2; best = p; }
     }
     return best;
   }
 
-  function reset() {
-    for (const w of walkers) game.scene.remove(w.parts.group);
-    walkers.length = 0;
+  function damage(p, amount, opts = {}) {
+    if (!p.alive) return;
+    p.health -= amount;
+    if (opts.head) bus.emit('headshot', { ped: p });
+    if (p.health <= 0) {
+      p.health = 0;
+      p.alive = false;
+      p.state = 'dead';
+      p.deadTimer = 12;
+      // Fall flat: no gore, just a body on the ground.
+      p.mesh.rotation.x = -Math.PI / 2;
+      p.mesh.position.y = 0.25;
+      bus.emit('ped-down', { ped: p, weapon: opts.weapon || null, head: !!opts.head });
+    } else if (p.kind === 'gang') {
+      p.hostile = true;
+      p.state = 'fight';
+    } else {
+      p.state = 'flee';
+    }
   }
 
+  // ---------- Reactions to the event bus ----------
+  function scareAt(x, z, radius) {
+    for (const p of peds) {
+      if (!p.alive || p.kind === 'gang') continue;
+      const d = Math.hypot(p.x - x, p.z - z);
+      if (d < radius) {
+        p.state = 'flee';
+        // A fleeing witness who saw the crime starts the 5-second call.
+        if (p.witnessTimer < 0 && d < 26) {
+          p.witnessTimer = 5;
+          p.witnessPos = { x, z };
+        }
+      }
+    }
+  }
+  bus.on('shot', ({ muzzle }) => { if (muzzle) scareAt(muzzle.x, muzzle.z, 30); });
+  bus.on('crash', ({ x, z }) => { if (x !== undefined) scareAt(x, z, 18); });
+  bus.on('vehicle-destroyed', ({ vehicle }) => { if (vehicle) scareAt(vehicle.x, vehicle.z, 35); });
+  bus.on('kill', () => { /* witnesses are already scared by the shot */ });
+
+  function update(dt, ctx) {
+    const px = ctx.playerPos.x;
+    const pz = ctx.playerPos.z;
+    for (let i = peds.length - 1; i >= 0; i--) {
+      const p = peds[i];
+      if (!p.alive) {
+        p.deadTimer -= dt;
+        if (p.deadTimer <= 0) {
+          group.remove(p.mesh);
+          peds.splice(i, 1);
+        }
+        continue;
+      }
+      // Witness call: 5 seconds, cancelled if the player gets far away.
+      if (p.witnessTimer > 0) {
+        p.witnessTimer -= dt;
+        const d = Math.hypot(p.x - px, p.z - pz);
+        if (d > 45) {
+          p.witnessTimer = -1; // escaped before the call went through
+        } else if (p.witnessTimer <= 0) {
+          p.witnessTimer = -1;
+          bus.emit('witness', { x: p.witnessPos.x, z: p.witnessPos.z, ped: p });
+        }
+      }
+
+      if (p.state === 'flee') {
+        // Run directly away from the player, dodging buildings.
+        const dx = p.x - px;
+        const dz = p.z - pz;
+        const d = Math.hypot(dx, dz) || 1;
+        const nx = p.x + (dx / d) * FLEE_SPEED * dt;
+        const nz = p.z + (dz / d) * FLEE_SPEED * dt;
+        const res = city.resolveCircle(nx, nz, 0.5);
+        p.x = res.x; p.z = res.z;
+        p.heading = Math.atan2(dx, dz);
+        p.speed = FLEE_SPEED;
+        p.walkPhase += dt * 9;
+        if (d > 55) {
+          p.state = 'walk';
+          assignWalkRoute(p);
+        }
+      } else if (p.state === 'fight') {
+        // Hostile: close to 14 m, then shoot with real inaccuracy.
+        const dx = px - p.x;
+        const dz = pz - p.z;
+        const d = Math.hypot(dx, dz);
+        p.heading = Math.atan2(dx, dz);
+        if (d > 14) {
+          const nx = p.x + (dx / d) * 3.4 * dt;
+          const nz = p.z + (dz / d) * 3.4 * dt;
+          const res = city.resolveCircle(nx, nz, 0.5);
+          p.x = res.x; p.z = res.z;
+          p.speed = 3.4;
+          p.walkPhase += dt * 7;
+        } else {
+          p.speed = 0;
+          p.shootCooldown -= dt;
+          if (p.shootCooldown <= 0) {
+            p.shootCooldown = 0.9 + rng() * 0.7;
+            bus.emit('shot', { weapon: 'p9', muzzle: { x: p.x, y: 1.3, z: p.z }, npc: true });
+            // Inaccuracy grows with distance; point-blank still hurts.
+            if (Math.random() < Math.max(0.12, 0.55 - d * 0.02)) {
+              damagePlayer(6 + Math.floor(rng() * 6), 'gang');
+            }
+          }
+        }
+      } else {
+        // Walk the route; pick a new destination at the end.
+        if (!p.route || p.routeIdx >= p.route.length) {
+          if (p.kind === 'walker') assignWalkRoute(p);
+          else { p.speed = 0; }
+        }
+        if (p.route && p.routeIdx < p.route.length) {
+          const t = p.route[p.routeIdx];
+          const dx = t.x - p.x;
+          const dz = t.z - p.z;
+          const d = Math.hypot(dx, dz);
+          if (d < 3) { p.routeIdx += 1; }
+          else {
+            p.heading = Math.atan2(dx, dz);
+            p.speed = WALKER_SPEED;
+            const nx = p.x + (dx / d) * WALKER_SPEED * dt;
+            const nz = p.z + (dz / d) * WALKER_SPEED * dt;
+            const res = city.resolveCircle(nx, nz, 0.5);
+            p.x = res.x; p.z = res.z;
+            p.walkPhase += dt * 3.2;
+          }
+        }
+      }
+
+      // Density follows the hour: busy at 08:00 and 17:00, quiet at 03:00.
+      // (Walkers already spawned stay; respawns refill the street.)
+      p.mesh.position.set(p.x, 0, p.z);
+      if (p.state !== 'dead') p.mesh.rotation.y = p.heading;
+      const swing = Math.sin(p.walkPhase) * Math.min(1, p.speed / WALKER_SPEED) * 0.12;
+      p.mesh.rotation.z = swing;
+    }
+
+    // Refill walkers if the street emptied (deaths, despawns).
+    const walkers = peds.filter((p) => p.kind === 'walker' && p.alive).length;
+    if (walkers < 14 && Math.random() < dt * 0.2) {
+      const pt = city.randomRoadPoint(rng);
+      // Spawn away from the player so nobody pops into view.
+      if (Math.hypot(pt.x - px, pt.z - pz) > 60) {
+        const p = makePed('walker', pt.x, pt.z);
+        assignWalkRoute(p);
+      }
+    }
+  }
+
+  spawnWalkers();
+
   return {
-    walkers, update, hurt, startFlee, startWitness, nearest, reset, spawnWalker,
+    peds,
+    update,
+    damage,
+    nearestPed,
+    spawnGang,
+    makePed,
+    buildPersonMesh,
   };
 }

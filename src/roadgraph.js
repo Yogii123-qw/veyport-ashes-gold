@@ -1,183 +1,94 @@
-// RoadGraph: the one road network shared by traffic, police, route
-// drawing and spawn logic. Nodes sit at every grid intersection and ring
-// junction; edges run along avenues, streets and the ring road. Routes
-// are Dijkstra over ~80 nodes — cheap enough to run per request.
+// roadgraph.js — the one road graph every system shares (SPEC §2.2).
+//
+// Traffic, police, missions and the minimap route line all read this
+// single graph: nodes at every grid intersection, edges along the roads,
+// BFS routing between any two points. One source of truth, not three
+// implementations. Extracted from city.js in the phase-2 restructure;
+// the city still owns the roads' geometry, this owns their topology.
 
-import { GRID_LINES, RING } from '../data/cityData.js';
-import { dist2 } from './utils.js';
+export const GRID_STEP = 150;
+export const GRID_LINES = [-600, -450, -300, -150, 0, 150, 300, 450, 600];
 
-export function createRoadGraph() {
+export function createRoadGraph(rngFn) {
   const nodes = [];
-  const indexByKey = new Map();
-  const adjacency = new Map();
-
-  function addNode(x, z) {
-    const key = `${x},${z}`;
-    if (indexByKey.has(key)) return indexByKey.get(key);
-    const id = nodes.length;
-    nodes.push({ id, x, z });
-    indexByKey.set(key, id);
-    adjacency.set(id, []);
-    return id;
-  }
-  function link(a, b) {
-    const w = dist2(nodes[a].x, nodes[a].z, nodes[b].x, nodes[b].z);
-    adjacency.get(a).push({ to: b, w });
-    adjacency.get(b).push({ to: a, w });
-  }
-
-  // Grid intersections.
+  const nodeIndex = new Map();
   for (const gx of GRID_LINES) {
-    for (const gz of GRID_LINES) addNode(gx, gz);
-  }
-  // Ring junctions: avenues and streets meet the ring.
-  for (const g of GRID_LINES) {
-    addNode(g, -RING);
-    addNode(g, RING);
-    addNode(-RING, g);
-    addNode(RING, g);
-  }
-  addNode(-RING, -RING);
-  addNode(RING, -RING);
-  addNode(-RING, RING);
-  addNode(RING, RING);
-
-  const sorted = [...GRID_LINES].sort((a, b) => a - b);
-  // Avenues (north-south): from -RING to RING through every grid street.
-  for (const gx of GRID_LINES) {
-    const stops = [-RING, ...sorted, RING];
-    for (let i = 0; i < stops.length - 1; i += 1) {
-      link(indexByKey.get(`${gx},${stops[i]}`), indexByKey.get(`${gx},${stops[i + 1]}`));
+    for (const gz of GRID_LINES) {
+      if (gz > 520) continue; // beach has no intersections
+      const id = nodes.length;
+      nodeIndex.set(`${gx},${gz}`, id);
+      nodes.push({ x: gx, z: gz });
     }
   }
-  // Streets (east-west).
-  for (const gz of GRID_LINES) {
-    const stops = [-RING, ...sorted, RING];
-    for (let i = 0; i < stops.length - 1; i += 1) {
-      link(indexByKey.get(`${stops[i]},${gz}`), indexByKey.get(`${stops[i + 1]},${gz}`));
+  const adjacency = nodes.map(() => []);
+  for (const gx of GRID_LINES) {
+    for (const gz of GRID_LINES) {
+      if (gz > 520) continue;
+      const id = nodeIndex.get(`${gx},${gz}`);
+      for (const [dx, dz] of [[150, 0], [-150, 0], [0, 150], [0, -150]]) {
+        const nid = nodeIndex.get(`${gx + dx},${gz + dz}`);
+        if (nid !== undefined) adjacency[id].push(nid);
+      }
     }
   }
-  // Ring road rectangle.
-  const ringStops = [-RING, ...sorted, RING];
-  for (let i = 0; i < ringStops.length - 1; i += 1) {
-    link(indexByKey.get(`${ringStops[i]},${-RING}`), indexByKey.get(`${ringStops[i + 1]},${-RING}`));
-    link(indexByKey.get(`${ringStops[i]},${RING}`), indexByKey.get(`${ringStops[i + 1]},${RING}`));
-    link(indexByKey.get(`${-RING},${ringStops[i]}`), indexByKey.get(`${-RING},${ringStops[i + 1]}`));
-    link(indexByKey.get(`${RING},${ringStops[i]}`), indexByKey.get(`${RING},${ringStops[i + 1]}`));
-  }
-
-  // Road centreline segments, for ground texture, minimap and proximity.
-  const segments = [];
-  for (const gx of GRID_LINES) segments.push({ ax: gx, az: -RING, bx: gx, bz: RING });
-  for (const gz of GRID_LINES) segments.push({ ax: -RING, az: gz, bx: RING, bz: gz });
-  segments.push({ ax: -RING, az: -RING, bx: RING, bz: -RING });
-  segments.push({ ax: -RING, az: RING, bx: RING, bz: RING });
-  segments.push({ ax: -RING, az: -RING, bx: -RING, bz: RING });
-  segments.push({ ax: RING, az: -RING, bx: RING, bz: RING });
 
   function nearestNode(x, z) {
     let best = 0;
     let bestD = Infinity;
-    for (const n of nodes) {
-      const d = dist2(x, z, n.x, n.z);
-      if (d < bestD) { bestD = d; best = n.id; }
+    for (let i = 0; i < nodes.length; i++) {
+      const dx = nodes[i].x - x;
+      const dz = nodes[i].z - z;
+      const dd = dx * dx + dz * dz;
+      if (dd < bestD) { bestD = dd; best = i; }
     }
     return best;
   }
 
-  function dijkstra(start, goal) {
-    const dist = new Array(nodes.length).fill(Infinity);
+  /** BFS route between two points; returns [{x, z}] waypoints. */
+  function route(ax, az, bx, bz) {
+    const start = nearestNode(ax, az);
+    const goal = nearestNode(bx, bz);
     const prev = new Array(nodes.length).fill(-1);
-    const done = new Array(nodes.length).fill(false);
-    dist[start] = 0;
-    for (let iter = 0; iter < nodes.length; iter += 1) {
-      let u = -1;
-      let best = Infinity;
-      for (let i = 0; i < nodes.length; i += 1) {
-        if (!done[i] && dist[i] < best) { best = dist[i]; u = i; }
-      }
-      if (u === -1) break;
-      done[u] = true;
-      if (u === goal) break;
-      for (const edge of adjacency.get(u)) {
-        const nd = dist[u] + edge.w;
-        if (nd < dist[edge.to]) {
-          dist[edge.to] = nd;
-          prev[edge.to] = u;
-        }
+    const queue = [start];
+    prev[start] = start;
+    while (queue.length) {
+      const cur = queue.shift();
+      if (cur === goal) break;
+      for (const n of adjacency[cur]) {
+        if (prev[n] === -1) { prev[n] = cur; queue.push(n); }
       }
     }
-    if (dist[goal] === Infinity) return null;
     const path = [];
     let cur = goal;
-    while (cur !== -1) {
-      path.push(cur);
+    let guard = 0;
+    while (cur !== start && cur !== -1 && guard < 200) {
+      path.unshift({ x: nodes[cur].x, z: nodes[cur].z });
       cur = prev[cur];
+      guard += 1;
     }
-    path.reverse();
+    path.unshift({ x: nodes[start].x, z: nodes[start].z });
     return path;
   }
 
-  /** Route as world points from (x,z) to (tx,tz), including both ends. */
-  function route(x, z, tx, tz) {
-    const start = nearestNode(x, z);
-    const goal = nearestNode(tx, tz);
-    // Same intersection at both ends: the direct line is the route.
-    // Skips a pointless Dijkstra and a duplicate-node detour.
-    if (start === goal) return [{ x, z }, { x: tx, z: tz }];
-    const path = dijkstra(start, goal);
-    if (!path) return [{ x, z }, { x: tx, z: tz }];
-    const points = [{ x, z }];
-    for (const id of path) points.push({ x: nodes[id].x, z: nodes[id].z });
-    points.push({ x: tx, z: tz });
-    return points;
+  function nearestRoadPoint(x, z) {
+    const gx = Math.max(-600, Math.min(600, Math.round(x / GRID_STEP) * GRID_STEP));
+    const gz = Math.max(-600, Math.min(600, Math.round(z / GRID_STEP) * GRID_STEP));
+    if (Math.abs(x - gx) <= Math.abs(z - gz)) return { x: gx, z };
+    return { x, z: gz };
   }
 
-  function nearestRoadPoint(x, z) {
-    let best = null;
-    let bestD = Infinity;
-    for (const s of segments) {
-      const dx = s.bx - s.ax;
-      const dz = s.bz - s.az;
-      const len2 = dx * dx + dz * dz;
-      let t = len2 === 0 ? 0 : ((x - s.ax) * dx + (z - s.az) * dz) / len2;
-      t = Math.max(0, Math.min(1, t));
-      const px = s.ax + dx * t;
-      const pz = s.az + dz * t;
-      const d = dist2(x, z, px, pz);
-      if (d < bestD) {
-        bestD = d;
-        best = { x: px, z: pz, dist: d, heading: Math.atan2(dx, dz) };
-      }
-    }
-    return best;
+  function randomRoadPoint(rngOverride) {
+    const use = rngOverride || rngFn;
+    const n = nodes[Math.floor(use() * nodes.length)];
+    return { x: n.x + (use() - 0.5) * 10, z: n.z + (use() - 0.5) * 10 };
   }
 
   return {
     nodes,
-    segments,
-    nearestNode,
+    adjacency,
     route,
-    routeLength(x, z, tx, tz) {
-      const pts = route(x, z, tx, tz);
-      let total = 0;
-      for (let i = 1; i < pts.length; i += 1) total += dist2(pts[i - 1].x, pts[i - 1].z, pts[i].x, pts[i].z);
-      return total;
-    },
+    nearestNode,
     nearestRoadPoint,
-    onRoad(x, z) {
-      return nearestRoadPoint(x, z).dist <= 9.5;
-    },
-    randomNode(random, cx, cz, minDist, maxDist) {
-      const candidates = nodes.filter((n) => {
-        const d = dist2(cx, cz, n.x, n.z);
-        return d >= minDist && d <= maxDist;
-      });
-      if (candidates.length === 0) return nodes[Math.floor(random() * nodes.length)];
-      return candidates[Math.floor(random() * candidates.length)];
-    },
-    nodePosition(id) {
-      return nodes[id];
-    },
+    randomRoadPoint,
   };
 }

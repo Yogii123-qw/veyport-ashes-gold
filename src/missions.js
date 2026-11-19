@@ -1,486 +1,437 @@
-// The story engine: six missions as chains of typed stages, each
-// stage a real check against the live world — distances, kills, timers,
-// vehicles, choices. Failure is real too, with retry from the last
-// checkpoint stage. Rewards and unlocks land through the economy, and
-// the ending choice in M6 is recorded in the save.
+// missions.js — the six story missions of Veyport (SPEC §3.1).
+//
+// Each mission is data: a chain of stages, and each stage is one kind
+// of work — go somewhere, talk, steal a car, deliver on a timer, defeat
+// a group, defend a place, chase a moving target, break a truck, race
+// checkpoints, or choose. Stages are checked every frame against real
+// game state; nothing completes by a timer pretending to be progress.
+// Failures are real too (timer out, target dead, truck destroyed) and
+// restart from the last checkpoint stage. The M5 and M6 choices are
+// recorded in the save and change the ending.
 
-import { CHARACTERS, MISSIONS, missionById } from '../data/missionsData.js';
-import { POIS, poiById } from '../data/cityData.js';
-import { clamp, dist2 } from './utils.js';
-import { animateWalker, buildWalkerMesh } from './pedestrians.js';
+import { pickText } from './langData.js';
+import { LANDMARKS } from './city.js';
 
-export function createMissions(game) {
-  let active = null;
-  let beacon = null;
-  let traitor = null;
-  let targetVehicle = null;
-  let dialogPlaying = false;
-  let suppressHeat = false;
+const DIALOG = {
+  ilex1: [
+    { speaker: { id: 'Madame Ilex', en: 'Madame Ilex' }, portrait: 28, text: { id: 'Rook Calloway. Akhirnya pulang juga. Utang adikmu, Cole — $8.000 ke Harbormen. Mereka tidak lupa.', en: 'Rook Calloway. Home at last. Your brother Cole\'s debt — $8,000 to the Harbormen. They don\'t forget.' } },
+    { speaker: { id: 'Madame Ilex', en: 'Madame Ilex' }, portrait: 28, text: { id: 'Kerja pertama: curi mobil di luar sana, antar ke safehouse-mu. Jangan buat keributan.', en: 'First job: steal a car out there, bring it to your safehouse. Don\'t make a scene.' } },
+  ],
+  drayke2: [
+    { speaker: { id: 'Marlow Drayke', en: 'Marlow Drayke' }, portrait: 210, text: { id: 'Kargo panas di dok. Antar ke tiga titik sebelum dingin. Polisi sudah mengendus — jangan berhenti.', en: 'Hot cargo at the docks. Deliver to three points before it goes cold. The police are sniffing — don\'t stop.' } },
+  ],
+  ilex3: [
+    { speaker: { id: 'Madame Ilex', en: 'Madame Ilex' }, portrait: 28, text: { id: 'Foundry Kings membajak kargo kita. Masuk chop-shop mereka, ambil mobil bertanda itu. Penjaganya tidak ramah.', en: 'The Foundry Kings hijacked our cargo. Get into their chop-shop and take the marked car. Its guards are not friendly.' } },
+  ],
+  drayke4: [
+    { speaker: { id: 'Marlow Drayke', en: 'Marlow Drayke' }, portrait: 210, text: { id: 'Balapan malam ini, Neon Mile. Tiga checkpoint. Menang, dan KR-9 itu milikmu. Kalah, dan kamu milik mereka.', en: 'Tonight\'s race, Neon Mile. Three checkpoints. Win, and the KR-9 is yours. Lose, and you are theirs.' } },
+  ],
+  pell5: [
+    { speaker: { id: 'Sersan Ada Pell', en: 'Sergeant Ada Pell' }, portrait: 150, text: { id: 'Aku tahu siapa kamu, Rook. Cole pernah menyelamatkan nyawaku. Utang itu direkayasa — Vex yang menulisnya.', en: 'I know who you are, Rook. Cole once saved my life. That debt was forged — Vex wrote it.' } },
+  ],
+  vex6: [
+    { speaker: { id: 'Vex Kroll', en: 'Vex Kroll' }, portrait: 350, text: { id: 'Emas itu milikku, Rook. Adikmu hanya pion. Sekarang pilih: serahkan aku ke polisi, atau ambil emasnya dan pergi.', en: 'That gold is mine, Rook. Your brother was only a pawn. Now choose: hand me to the police, or take the gold and walk away.' } },
+  ],
+};
 
-  function lang() { return game.settings.language; }
-  function text(pair) { return pair[lang()] || pair.en; }
+const MISSIONS = [
+  {
+    id: 'm1', title: { id: 'Homecoming Ash', en: 'Homecoming Ash' }, reward: 400,
+    stages: [
+      { id: 'walk-bar', kind: 'goto', x: 30, z: -180, r: 14, text: { id: 'Jalan kaki ke bar The Rusty Anchor', en: 'Walk to The Rusty Anchor bar' } },
+      { id: 'talk-ilex', kind: 'dialog', lines: DIALOG.ilex1, text: { id: 'Bicara dengan Madame Ilex', en: 'Talk to Madame Ilex' } },
+      { id: 'steal-car', kind: 'enterVehicle', text: { id: 'Curi mobil pertama', en: 'Steal your first car' } },
+      { id: 'to-safehouse', kind: 'driveTo', x: -460, z: -380, r: 12, text: { id: 'Antar mobil ke safehouse', en: 'Deliver the car to the safehouse' } },
+    ],
+  },
+  {
+    id: 'm2', title: { id: 'Hot Cargo', en: 'Hot Cargo' }, reward: 600,
+    stages: [
+      { id: 'pickup', kind: 'goto', x: -520, z: -480, r: 9, text: { id: 'Ambil kargo di dok', en: 'Pick up the cargo at the docks' } },
+      { id: 'talk-drayke', kind: 'dialog', lines: DIALOG.drayke2, text: { id: 'Dengar instruksi Drayke', en: 'Hear Drayke\'s instructions' } },
+      { id: 'drop1', kind: 'deliver', x: 150, z: -300, r: 9, time: 150, text: { id: 'Antar kargo: titik 1 dari 3', en: 'Deliver the cargo: point 1 of 3' } },
+      { id: 'drop2', kind: 'deliver', x: 420, z: 150, r: 9, time: 150, text: { id: 'Antar kargo: titik 2 dari 3', en: 'Deliver the cargo: point 2 of 3' } },
+      { id: 'drop3', kind: 'deliver', x: -150, z: 450, r: 9, time: 150, text: { id: 'Antar kargo: titik 3 dari 3', en: 'Deliver the cargo: point 3 of 3' } },
+      { id: 'escape', kind: 'driveTo', x: -460, z: -380, r: 12, text: { id: 'Kabur ke safehouse', en: 'Escape to the safehouse' } },
+    ],
+  },
+  {
+    id: 'm3', title: { id: 'The Foundry Cut', en: 'The Foundry Cut' }, reward: 900,
+    stages: [
+      { id: 'sneak', kind: 'goto', x: -400, z: 180, r: 16, text: { id: 'Susup ke chop-shop Foundry Kings', en: 'Sneak into the Foundry Kings chop-shop' } },
+      { id: 'guards', kind: 'defeat', gang: 'foundry', count: 3, x: -400, z: 200, text: { id: 'Lumpuhkan 3 penjaga chop-shop', en: 'Take down the 3 chop-shop guards' } },
+      { id: 'marked-car', kind: 'enterVehicleType', type: 'swift', x: -390, z: 200, text: { id: 'Curi mobil bertanda (Swift)', en: 'Steal the marked car (Swift)' } },
+      { id: 'run', kind: 'driveTo', x: -460, z: -380, r: 12, text: { id: 'Kabur dari roadblock ke safehouse', en: 'Escape the roadblock to the safehouse' } },
+    ],
+  },
+  {
+    id: 'm4', title: { id: 'Neon Mile Run', en: 'Neon Mile Run' }, reward: 1200,
+    stages: [
+      { id: 'talk-drayke', kind: 'dialog', lines: DIALOG.drayke4, text: { id: 'Dengar instruksi Drayke', en: 'Hear Drayke\'s instructions' } },
+      { id: 'race1', kind: 'race', x: -150, z: -150, r: 10, time: 150, text: { id: 'Balapan: checkpoint 1 dari 3', en: 'Race: checkpoint 1 of 3' } },
+      { id: 'race2', kind: 'race', x: 150, z: -150, r: 10, time: 150, text: { id: 'Balapan: checkpoint 2 dari 3', en: 'Race: checkpoint 2 of 3' } },
+      { id: 'race3', kind: 'race', x: 300, z: 150, r: 10, time: 150, text: { id: 'Balapan: checkpoint 3 dari 3', en: 'Race: checkpoint 3 of 3' } },
+      { id: 'ambush', kind: 'defeat', gang: 'foundry', count: 4, x: 300, z: 150, text: { id: 'Hadapi penyergapan geng', en: 'Fight off the gang ambush' } },
+      { id: 'to-palm', kind: 'driveTo', x: 420, z: -420, r: 12, text: { id: 'Kabur ke Palm Heights', en: 'Escape to Palm Heights' } },
+    ],
+  },
+  {
+    id: 'm5', title: { id: 'Harbor of Lies', en: 'Harbor of Lies' }, reward: 1500,
+    stages: [
+      { id: 'wave1', kind: 'defend', gang: 'foundry', count: 2, wave: 1, x: -460, z: -380, r: 30, text: { id: 'Pertahankan safehouse: gelombang 1 dari 3', en: 'Defend the safehouse: wave 1 of 3' } },
+      { id: 'wave2', kind: 'defend', gang: 'foundry', count: 3, wave: 2, x: -460, z: -380, r: 30, text: { id: 'Pertahankan safehouse: gelombang 2 dari 3', en: 'Defend the safehouse: wave 2 of 3' } },
+      { id: 'wave3', kind: 'defend', gang: 'foundry', count: 4, wave: 3, x: -460, z: -380, r: 30, text: { id: 'Pertahankan safehouse: gelombang 3 dari 3', en: 'Defend the safehouse: wave 3 of 3' } },
+      { id: 'chase', kind: 'chase', gang: 'foundry', x: -300, z: -300, r: 7, text: { id: 'Kejar pengkhianat itu', en: 'Chase down the traitor' } },
+      { id: 'choice', kind: 'choice', lines: DIALOG.pell5, choices: [
+        { label: { id: 'Tangkap dia — serahkan ke Pell', en: 'Capture him — hand him to Pell' }, value: 'capture', default: true },
+        { label: { id: 'Lepaskan dia — biarkan lari', en: 'Let him go' }, value: 'release' },
+      ], text: { id: 'Putuskan nasib pengkhianat', en: 'Decide the traitor\'s fate' } },
+    ],
+  },
+  {
+    id: 'm6', title: { id: 'Ashes & Gold', en: 'Ashes & Gold' }, reward: 2500,
+    stages: [
+      { id: 'intercept', kind: 'damageVehicle', type: 'armored', x: -100, z: -100, below: 0.4, text: { id: 'Cegat truk lapis baja Vex — hancurkan sampai berhenti', en: 'Intercept Vex\'s armored truck — wreck it until it stops' } },
+      { id: 'to-lighthouse', kind: 'driveTo', x: 480, z: 520, r: 16, text: { id: 'Kejar ke mercusuar Ember Sands', en: 'Chase it to the Ember Sands lighthouse' } },
+      { id: 'showdown', kind: 'defeat', gang: 'foundry', count: 5, x: 480, z: 520, boss: true, text: { id: 'Hadapi Vex dan pengawalnya', en: 'Face Vex and his guards' } },
+      { id: 'final', kind: 'choice', lines: DIALOG.vex6, choices: [
+        { label: { id: 'Serahkan Vex ke Pell (Abu)', en: 'Hand Vex to Pell (Ashes)' }, value: 'ashes', default: true },
+        { label: { id: 'Ambil emasnya dan pergi (Emas)', en: 'Take the gold and walk away (Gold)' }, value: 'gold' },
+      ], text: { id: 'Pilihan akhir: Abu atau Emas', en: 'Final choice: Ashes or Gold' } },
+    ],
+  },
+];
 
-  function clearBeacon() {
-    if (beacon) {
-      game.scene.remove(beacon);
-      beacon = null;
-    }
-  }
+export function createMissions(deps) {
+  const { player, vehicles, city, economy, bus, dialogs, wanted, weather, pedestrians } = deps;
+  const lang = () => (deps.getLang ? deps.getLang() : 'id');
+  const notify = (msg) => { if (deps.notify) deps.notify(msg); };
 
-  function setBeacon(x, z, color = 0xffc35c) {
-    clearBeacon();
-    beacon = game.city.createBeacon(x, z, color);
-    game.scene.add(beacon);
-    game.minimap.setTarget(x, z);
-  }
+  const state = {
+    activeIndex: -1, // index into MISSIONS, -1 = none
+    stageIdx: 0,
+    stageState: {},
+    completed: [],
+    choices: {},
+    storyComplete: false,
+    ending: null,
+    nextDelay: 0,
+    failed: 0,
+    elapsed: 0, // seconds spent on the active mission (result screen)
+  };
 
-  function cleanupStageArtifacts() {
-    clearBeacon();
-    game.minimap.setTarget(null, null);
-    if (traitor) {
-      game.scene.remove(traitor.parts.group);
-      traitor = null;
-    }
-  }
+  let spawned = []; // entities this stage owns (peds, vehicles)
 
-  function spawnStageSquads(stage) {
-    const tag = active.tag;
-    for (const group of stage.spawn) {
-      game.gangs.spawnSquad(group.faction, group.x, group.z, group.count, { tag, hostile: true });
-    }
-  }
-
-  function enterStage(index) {
-    const stage = active.mission.stages[index];
-    if (!stage) {
-      completeMission();
-      return;
-    }
-    active.stageIndex = index;
-    active.data = {};
-    if (stage.checkpoint) active.checkpointIndex = index;
-    cleanupStageArtifacts();
-    game.hud.setObjective(text(stage.objective), stage.x ?? null, stage.z ?? null);
-    switch (stage.type) {
-      case 'goto':
-        setBeacon(stage.x, stage.z);
-        break;
-      case 'talk': {
-        const poi = poiById(stage.poi);
-        setBeacon(poi.x, poi.z, 0x7fd4ff);
-        break;
+  function cleanupSpawned() {
+    for (const s of spawned) {
+      if (s.kind === 'ped' && s.obj.alive) {
+        // Despawn quietly: remove the mesh, drop the ped.
+        s.obj.alive = false;
+        s.obj.mesh.visible = false;
       }
-      case 'dialog':
-        dialogPlaying = true;
-        game.dialogs.play(stage.lines, () => {
-          dialogPlaying = false;
-          advance();
-        });
-        break;
-      case 'enterVehicle': {
-        targetVehicle = game.vehicles.spawn(stage.spawnType, stage.spawnAt.x, stage.spawnAt.z, stage.spawnAt.heading, { mission: true });
-        setBeacon(stage.spawnAt.x, stage.spawnAt.z);
-        game.hud.setObjective(text(stage.objective), stage.spawnAt.x, stage.spawnAt.z);
-        break;
-      }
-      case 'deliver':
-        active.data.dropIndex = 0;
-        active.data.timer = stage.timeLimit;
-        setBeacon(stage.points[0].x, stage.points[0].z);
-        break;
-      case 'eliminate':
-        spawnStageSquads(stage);
-        game.hud.setObjective(text(stage.objective), null, null);
-        break;
-      case 'defend':
-        active.data.waveIndex = -1;
-        active.data.waveGap = 0;
-        setBeacon(stage.center.x, stage.center.z, 0xff5a4a);
-        break;
-      case 'chase':
-        if (stage.targetVehicle) {
-          targetVehicle = game.vehicles.spawn(stage.targetVehicle, stage.spawnAt.x, stage.spawnAt.z, 0, { mission: true, driver: 'mission' });
-          active.data.route = game.roadgraph.route(stage.spawnAt.x, stage.spawnAt.z, stage.fleeTo.x, stage.fleeTo.z);
-          active.data.leg = 1;
-          active.data.blockTimer = 0;
-          setBeacon(stage.spawnAt.x, stage.spawnAt.z, 0xff5a4a);
-        } else {
-          const parts = buildWalkerMesh(0x3a3a3a, 0xa8764a, 0x1c1c1c, 0x222222);
-          parts.group.position.set(stage.spawnAt.x, 0, stage.spawnAt.z);
-          game.scene.add(parts.group);
-          traitor = {
-            x: stage.spawnAt.x, z: stage.spawnAt.z, heading: 0, parts, walkPhase: 0,
-            route: game.roadgraph.route(stage.spawnAt.x, stage.spawnAt.z, stage.fleeTo.x, stage.fleeTo.z),
-            leg: 1,
-          };
-          setBeacon(stage.spawnAt.x, stage.spawnAt.z, 0xff5a4a);
-        }
-        break;
-      case 'race':
-        active.data.gateIndex = 0;
-        active.data.timer = stage.timeLimit;
-        setBeacon(stage.checkpoints[0].x, stage.checkpoints[0].z);
-        break;
-      case 'choice':
-        dialogPlaying = true;
-        game.dialogs.play(stage.lines, () => {
-          dialogPlaying = false;
-          game.dialogs.showChoices(stage.choices, (choice) => applyChoice(stage, choice));
-        });
-        break;
-      case 'escape':
-        game.wanted.addHeat(35, game.player.x, game.player.z, { kind: 'escape', forced: true });
-        game.police.forceRoadblock();
-        setBeacon(stage.x, stage.z);
-        break;
-      default:
-        break;
-    }
-    game.hud.notify(`${text(active.mission.title)} · ${text(stage.objective)}`, 'info');
-  }
-
-  function advance() {
-    enterStage(active.stageIndex + 1);
-  }
-
-  function applyChoice(stage, choice) {
-    const effect = choice.effect || {};
-    if (effect.reputation) {
-      for (const [faction, delta] of Object.entries(effect.reputation)) {
-        game.progress.reputation[faction] = clamp(game.progress.reputation[faction] + delta, -100, 100);
+      if (s.kind === 'vehicle' && !s.obj.wrecked) {
+        vehicles.removeVehicle(s.obj);
       }
     }
-    if (effect.money) game.economy.earn(effect.money, text(choice.label));
-    if (effect.heat) game.wanted.addHeat(effect.heat, game.player.x, game.player.z, { kind: 'choice', forced: true });
-    if (effect.ending) {
-      game.progress.ending = effect.ending;
-      game.progress.flags.debtResolved = true;
-    }
-    game.dialogs.logLine('rook', text(choice.result));
-    game.hud.notify(text(choice.result), 'info');
-    advance();
+    spawned = [];
   }
 
-  function startMission(id, opts = {}) {
-    const mission = missionById(id);
-    if (!mission) return false;
-    if (active) return false;
-    if (game.contracts.active) {
-      game.hud.notify(game.lang('finishContractFirst'), 'bad');
-      return false;
+  function currentMission() {
+    return state.activeIndex >= 0 ? MISSIONS[state.activeIndex] : null;
+  }
+  function currentStage() {
+    const m = currentMission();
+    return m ? m.stages[state.stageIdx] : null;
+  }
+
+  function startMission(i) {
+    if (i < 0 || i >= MISSIONS.length) return false;
+    state.activeIndex = i;
+    state.stageIdx = 0;
+    state.stageState = {};
+    state.elapsed = 0;
+    cleanupSpawned();
+    const m = MISSIONS[i];
+    bus.emit('mission-start', { mission: m.id, title: m.title });
+    if (i === 3) {
+      // M4 is a night race: the clock jumps to 21:00, honestly.
+      weather.setTime(21);
+      notify('Misi 4 dimulai malam hari — jam melompat ke 21:00.');
     }
-    if (mission.nightLock && !opts.replay) {
-      game.weather.setTime(mission.nightLock);
-      game.hud.notify(game.settings.language === 'id' ? 'Jam melompat ke 21:00 — balapan malam.' : 'The clock jumps to 21:00 — a night race.', 'info');
-    }
-    active = {
-      mission, stageIndex: 0, checkpointIndex: opts.fromStage ?? 0,
-      tag: `mission-${id}`, data: {},
-      startStats: { ...game.progress.stats },
-      startTime: game.time, maxStars: 0, replay: !!opts.replay,
-    };
-    game.audio.setMusicMode('mission');
-    enterStage(opts.fromStage ?? 0);
-    game.hud.centerMessage(text(mission.title), 3);
+    enterStage();
     return true;
   }
 
-  function failActive(reason) {
-    if (!active) return;
-    const mission = active.mission;
-    game.progress.stats.missionsFailed += 1;
-    // A failed stage must not leave its timer or counter on the HUD:
-    // the results screen is the only thing the player should see.
-    game.hud.setTimer(null);
-    game.hud.setCounter(null);
-    game.gangs.removeTag(active.tag);
-    cleanupStageArtifacts();
-    const failedId = mission.id;
-    active = null;
-    game.audio.setMusicMode('explore');
-    game.menus.showResults({
-      failed: true, reason, missionId: failedId,
-      onRetry: () => startMission(failedId, { fromStage: 0, replay: true }),
-    });
+  function enterStage() {
+    const st = currentStage();
+    if (!st) return;
+    state.stageState = { timeLeft: st.time || 0, kills: 0, target: null, dialogShown: false, raceNext: null };
+    const S = state.stageState;
+    if (st.kind === 'defeat' || st.kind === 'defend') {
+      const list = pedestrians.spawnGang(st.gang, st.x, st.z, st.count, { hostile: true });
+      for (const p of list) spawned.push({ kind: 'ped', obj: p });
+      S.need = st.count;
+      S.alive = list;
+    }
+    if (st.kind === 'chase') {
+      const list = pedestrians.spawnGang(st.gang, st.x, st.z, 1, { hostile: false });
+      S.target = list[0];
+      spawned.push({ kind: 'ped', obj: S.target });
+      // The traitor runs a route away from the player.
+      S.target.route = city.route(S.target.x, S.target.z, 300, 300);
+      S.target.routeIdx = 0;
+      S.target.state = 'walk';
+    }
+    if (st.kind === 'damageVehicle') {
+      // Spawn on the road, not on the stage point: the M6 point
+      // (-100,-100) sits inside a 30 m block in Neon Mile, so the truck
+      // was born trapped in the building — speed ~0, route stuck, and
+      // every shot died on the wall between muzzle and truck. The
+      // waypoint follows the live truck (waypoint() below), so the
+      // player still finds it; the truck then drives its route.
+      const spot = city.nearestRoadPoint(st.x, st.z) || { x: st.x, z: st.z };
+      const v = vehicles.makeVehicle(st.type, spot.x, spot.z, 0.8, { traffic: false });
+      v.cruise = v.def.topSpeed * 0.5;
+      v.route = city.route(v.x, v.z, 480, 520);
+      v.routeIdx = 0;
+      // Aim down the route from the start: a fixed spawn heading
+      // forces a ~120-degree turn in the first metres, and the turning
+      // arc carries the truck into the block on the inside of the
+      // corner, where it wedges forever (no turn authority at speed
+      // ~0, no reverse in traffic). Remember the mission destination
+      // so a wedge anywhere on the route re-routes back to it instead
+      // of to a random point (traffic.js).
+      if (v.route && v.route.length > 0) {
+        v.heading = Math.atan2(v.route[0].x - v.x, v.route[0].z - v.z);
+      }
+      v.missionDest = { x: 480, z: 520 };
+      v.traffic = true; // drive it along the route like traffic
+      spawned.push({ kind: 'vehicle', obj: v });
+      S.target = v;
+    }
+    if (st.kind === 'enterVehicleType') {
+      const v = vehicles.makeVehicle(st.type, st.x, st.z, 0.4, { parked: true });
+      // The marked car is mission-critical: the police converging on
+      // the player ram it (55 integrity = two hits) and the stage can
+      // never complete. It is invulnerable until the player gets in.
+      v.missionProtected = true;
+      spawned.push({ kind: 'vehicle', obj: v });
+      S.target = v;
+    }
+    if (st.kind === 'race') {
+      S.raceNext = { x: st.x, z: st.z, r: st.r };
+    }
+    if (st.kind === 'dialog' || st.kind === 'choice') {
+      if (!S.dialogShown) {
+        S.dialogShown = true;
+        dialogs.show({
+          lines: st.lines,
+          choices: st.choices || null,
+          onChoice: (value) => {
+            state.choices[st.id] = value;
+            advanceStage();
+          },
+          onDone: () => {
+            if (st.kind === 'dialog') advanceStage();
+          },
+        });
+      }
+    }
+    // Each drop stage has its own 150 s timer (M2): generous, but the
+    // clock is real and failing it restarts the mission.
+    if (st.id === 'pickup') {
+      // First wanted star of the story: the pickup is watched.
+      wanted.setStars(Math.max(wanted.stars, 1));
+    }
+    if (st.id === 'run') {
+      wanted.setStars(3);
+    }
+  }
+
+  function advanceStage() {
+    const m = currentMission();
+    if (!m) return;
+    state.stageIdx += 1;
+    if (state.stageIdx >= m.stages.length) {
+      completeMission();
+    } else {
+      enterStage();
+    }
   }
 
   function completeMission() {
-    const mission = active.mission;
-    const elapsed = game.time - active.startTime;
-    const shots = game.progress.stats.shots - (active.startStats.shots || 0);
-    const hits = game.progress.stats.hits - (active.startStats.hits || 0);
-    const accuracy = shots > 0 ? hits / shots : 1;
-    const damageTaken = (game.progress.stats.hpLost || 0) - (active.startStats.hpLost || 0);
-    const cleanBonus = active.maxStars === 0 ? 150 : 0;
-    const reward = mission.reward + cleanBonus;
-    game.economy.earn(reward, `${text(mission.title)}${cleanBonus ? ` (+${game.lang('cleanBonus')})` : ''}`);
-    const unlocks = mission.unlocks || {};
-    if (unlocks.safehouse) game.progress.flags.safehouse = true;
-    if (unlocks.contactDrayke) game.progress.flags.contactDrayke = true;
-    if (unlocks.freeRespray) game.progress.flags.freeRespray = (game.progress.flags.freeRespray || 0) + unlocks.freeRespray;
-    if (unlocks.weapon) game.player.giveWeapon(unlocks.weapon, true);
-    if (unlocks.heavyArmor) game.progress.flags.heavyArmor = true;
-    game.progress.missionsCompleted.add(mission.id);
-    game.progress.stats.missionsCompleted += 1;
-    game.gangs.removeTag(active.tag);
-    cleanupStageArtifacts();
-    game.hud.clearObjective();
-    const score = clamp(60 + accuracy * 30 - Math.min(30, elapsed / 30) - Math.min(20, damageTaken / 10) + (cleanBonus ? 10 : 0), 0, 100);
-    const rank = score >= 85 ? 'Gold' : score >= 65 ? 'Silver' : 'Bronze';
-    active = null;
-    game.audio.setMusicMode('explore');
-    game.save.autosave('mission');
-    game.menus.showResults({
-      failed: false, missionId: mission.id, time: elapsed, accuracy, damage: damageTaken,
-      reward, cleanBonus, rank,
-      onReplay: () => startMission(mission.id, { replay: true }),
-    });
+    const m = currentMission();
+    economy.earn(m.reward, `Misi selesai: ${m.title.en}`);
+    state.completed.push(m.id);
+    bus.emit('mission-complete', { mission: m.id, reward: m.reward, time: Math.round(state.elapsed) });
+    if (m.id === 'm3') economy.grantFreeRespray();
+    if (m.id === 'm4') {
+      player.giveWeapon('kr9', 60);
+      notify('KR-9 Ripper didapat!');
+    }
+    if (m.id === 'm5') player.state.armor = 100;
+    if (m.id === 'm6') {
+      state.storyComplete = true;
+      state.ending = state.choices.final || 'ashes';
+      bus.emit('story-complete', { ending: state.ending });
+    }
+    cleanupSpawned();
+    state.activeIndex = -1;
+    state.stageIdx = 0;
+    state.nextDelay = 3;
   }
 
-  function cancelActive(cleanup = true) {
-    if (active && cleanup) game.gangs.removeTag(active.tag);
-    cleanupStageArtifacts();
-    active = null;
-    targetVehicle = null;
-    game.hud.clearObjective();
-    game.audio.setMusicMode('explore');
+  function failMission(reason) {
+    const m = currentMission();
+    if (!m) return;
+    state.failed += 1;
+    bus.emit('mission-failed', { mission: m.id, reason });
+    cleanupSpawned();
+    // Restart from the last checkpoint stage (a stage marked `checkpoint`,
+    // else the mission start). None are marked yet, so missions restart
+    // from stage 0 — honest, and stated in the fail notice.
+    state.stageIdx = 0;
+    state.stageState = {};
+    enterStage();
   }
 
-  function nextMission() {
-    return MISSIONS.find((m) => !game.progress.missionsCompleted.has(m.id)) || null;
-  }
+  // Kills of mission targets advance defeat/defend stages.
+  bus.on('ped-down', ({ ped }) => {
+    const st = currentStage();
+    if (!st || (st.kind !== 'defeat' && st.kind !== 'defend')) return;
+    if (spawned.some((s) => s.kind === 'ped' && s.obj === ped)) {
+      state.stageState.kills = (state.stageState.kills || 0) + 1;
+      if (state.stageState.kills >= st.count) advanceStage();
+    }
+  });
 
-  function availableAt(poiId) {
-    const next = nextMission();
-    if (next && next.startPoi === poiId && !active && !game.contracts.active) return next;
-    return null;
-  }
-
-  function onInteract(poiId) {
-    if (active) {
-      const stage = active.mission.stages[active.stageIndex];
-      if (stage && stage.type === 'talk' && stage.poi === poiId && !dialogPlaying) {
-        dialogPlaying = true;
-        game.dialogs.play(stage.lines, () => {
-          dialogPlaying = false;
-          advance();
-        });
-        return true;
+  function update(dt, ctx) {
+    // Auto-start the next mission a few seconds after the last one.
+    if (state.activeIndex < 0 && !state.storyComplete) {
+      const next = state.completed.length;
+      if (next < MISSIONS.length) {
+        state.nextDelay -= dt;
+        if (state.nextDelay <= 0) startMission(next);
       }
-      return false;
+      return;
     }
-    const mission = availableAt(poiId);
-    if (mission) {
-      startMission(mission.id);
-      return true;
-    }
-    return false;
-  }
+    const m = currentMission();
+    const st = currentStage();
+    if (!m || !st) return;
+    state.elapsed += dt; // mission clock: the result screen shows real time
+    const S = state.stageState;
+    const ps = player.state;
+    const p = player.position();
 
-  function updateTraitor(stage, dt) {
-    if (!traitor) return;
-    const node = traitor.route[traitor.leg];
-    if (!node) {
-      failActive('traitorEscaped');
-      return;
+    // Shared delivery timer (M2): runs across drop1..drop3.
+    if (st.kind === 'deliver') {
+      S.timeLeft -= dt;
+      if (S.timeLeft <= 0) { failMission('time'); return; }
     }
-    const want = Math.atan2(node.x - traitor.x, node.z - traitor.z);
-    traitor.heading += (((want - traitor.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI) * Math.min(1, dt * 6);
-    const moved = game.physics.moveWalker(traitor, Math.sin(traitor.heading), Math.cos(traitor.heading), 6.5, dt);
-    traitor.walkPhase += dt * 10 * (moved.moved ? 1 : 0);
-    animateWalker(traitor.parts, traitor.walkPhase, moved.moved ? 1 : 0, false, false);
-    traitor.parts.group.position.set(traitor.x, 0, traitor.z);
-    traitor.parts.group.rotation.y = traitor.heading;
-    if (beacon) beacon.position.set(traitor.x, 0, traitor.z);
-    game.minimap.setTarget(traitor.x, traitor.z);
-    if (dist2(traitor.x, traitor.z, node.x, node.z) < 8) traitor.leg += 1;
-    if (dist2(traitor.x, traitor.z, game.player.x, game.player.z) < 9) {
-      game.hud.notify(game.lang('traitorCaught'), 'good');
-      advance();
+    if (st.kind === 'race') {
+      S.timeLeft -= dt;
+      if (S.timeLeft <= 0) { failMission('time'); return; }
     }
-  }
 
-  function updateTruck(stage, dt) {
-    const truck = targetVehicle;
-    if (!truck || truck.wrecked) {
-      if (truck && truck.wrecked) advance();
-      return;
-    }
-    const node = active.data.route[active.data.leg];
-    if (!node) {
-      failActive('truckEscaped');
-      return;
-    }
-    const want = Math.atan2(node.x - truck.x, node.z - truck.z);
-    const err = ((want - truck.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
-    const steer = clamp(err * 1.6, -1, 1);
-    const collision = game.physics.stepVehicle(truck, truck.def, { throttle: truck.speed < truck.def.topSpeed * 0.6 ? 1 : 0.4, steer, handbrake: false }, dt, game.weather.gripMultiplier());
-    if (collision && collision.speed > 5) game.vehicles.damage(truck, collision.speed, truck.x, truck.z);
-    if (dist2(truck.x, truck.z, node.x, node.z) < 12) active.data.leg += 1;
-    if (beacon) beacon.position.set(truck.x, 0, truck.z);
-    game.minimap.setTarget(truck.x, truck.z);
-    const dPlayer = dist2(truck.x, truck.z, game.player.x, game.player.z);
-    if (truck.speed < 1 && dPlayer < 15) {
-      active.data.blockTimer += dt;
-      if (active.data.blockTimer > 3) {
-        game.hud.notify(game.lang('truckBlocked'), 'good');
-        advance();
-        return;
-      }
-    } else {
-      active.data.blockTimer = 0;
-    }
-    if (truck.integrity <= stage.disableAt) {
-      game.hud.notify(game.lang('truckDisabled'), 'good');
-      advance();
-      return;
-    }
-    if (dist2(truck.x, truck.z, stage.fleeTo.x, stage.fleeTo.z) < 20) {
-      failActive('truckEscaped');
-    }
-  }
-
-  function update(dt) {
-    if (!active) return;
-    active.maxStars = Math.max(active.maxStars, game.wanted.stars);
-    const stage = active.mission.stages[active.stageIndex];
-    if (!stage) return;
-    if (beacon) {
-      beacon.rotation.y += dt * 1.5;
-      beacon.position.y = 0.2 + Math.sin(game.time * 2) * 0.15;
-    }
-    const playerAt = (x, z, radius) => dist2(game.player.x, game.player.z, x, z) < radius;
-    switch (stage.type) {
-      case 'goto': {
-        if (stage.inVehicle && !game.player.vehicle) break;
-        if (stage.onFoot && game.player.vehicle) break;
-        if (playerAt(stage.x, stage.z, stage.radius)) {
-          if (stage.pickup) game.hud.notify(game.lang('cargoCollected'), 'good');
-          advance();
-        }
+    const distTo = (x, z) => Math.hypot(p.x - x, p.z - z);
+    switch (st.kind) {
+      case 'goto':
+        if (distTo(st.x, st.z) < st.r) advanceStage();
         break;
-      }
-      case 'deliver': {
-        active.data.timer -= dt;
-        game.hud.setTimer(active.data.timer);
-        if (active.data.timer <= 0) {
-          failActive('timeOut');
-          return;
-        }
-        const point = stage.points[active.data.dropIndex];
-        if (point && playerAt(point.x, point.z, 12)) {
-          active.data.dropIndex += 1;
-          game.audio.playSfx('cash', game.player.x, game.player.z);
-          if (active.data.dropIndex === stage.heatAtDrop) {
-            game.wanted.addHeat(stage.heatAmount, game.player.x, game.player.z, { kind: 'delivery', forced: true });
-            game.hud.notify(game.lang('heatRising'), 'bad');
-          }
-          if (active.data.dropIndex >= stage.points.length) {
-            game.hud.setTimer(null);
-            advance();
-          } else {
-            const next = stage.points[active.data.dropIndex];
-            setBeacon(next.x, next.z);
-            game.hud.setObjective(text(stage.objective), next.x, next.z);
-          }
-        }
+      case 'driveTo':
+        if (ps.inVehicle && distTo(st.x, st.z) < st.r) advanceStage();
+        else if (!ps.inVehicle && distTo(st.x, st.z) < st.r * 0.5) advanceStage();
         break;
-      }
-      case 'eliminate': {
-        const left = game.gangs.aliveWithTag(active.tag);
-        game.hud.setCounter(left);
-        if (left === 0) {
-          game.hud.setCounter(null);
-          advance();
-        }
+      case 'deliver':
+        if (distTo(st.x, st.z) < st.r) advanceStage();
         break;
-      }
-      case 'defend': {
-        if (active.data.waveIndex === -1 || (game.gangs.aliveWithTag(active.tag) === 0 && active.data.waveGap <= 0)) {
-          active.data.waveIndex += 1;
-          if (active.data.waveIndex >= stage.waves.length) {
-            game.hud.setCounter(null);
-            advance();
-            break;
-          }
-          const wave = stage.waves[active.data.waveIndex];
-          wave.spawnAt.forEach(([x, z]) => {
-            game.gangs.spawnMember('foundry', x, z, { tag: active.tag, hostile: true });
-          });
-          active.data.waveGap = 3;
-          game.hud.notify(`${game.lang('wave')} ${active.data.waveIndex + 1}/${stage.waves.length}`, 'bad');
-          game.audio.playSfx('horn', stage.center.x, stage.center.z);
-        } else {
-          active.data.waveGap -= dt;
-          game.hud.setCounter(game.gangs.aliveWithTag(active.tag));
+      case 'race':
+        if (distTo(st.x, st.z) < st.r) advanceStage();
+        break;
+      case 'enterVehicle':
+        if (ps.inVehicle) advanceStage();
+        break;
+      case 'enterVehicleType': {
+        const v = S.target;
+        if (v && ps.inVehicle && ps.vehicle === v) {
+          v.missionProtected = false; // the player's car now, normal rules
+          advanceStage();
         }
         break;
       }
       case 'chase': {
-        if (stage.targetVehicle) updateTruck(stage, dt);
-        else updateTraitor(stage, dt);
+        const t = S.target;
+        if (t && t.alive && distTo(t.x, t.z) < st.r) advanceStage();
+        else if (t && !t.alive) failMission('target-dead');
         break;
       }
-      case 'race': {
-        active.data.timer -= dt;
-        game.hud.setTimer(active.data.timer);
-        game.hud.setCounter(stage.checkpoints.length - active.data.gateIndex);
-        if (active.data.timer <= 0) {
-          failActive('timeOut');
-          return;
-        }
-        const gate = stage.checkpoints[active.data.gateIndex];
-        if (gate && playerAt(gate.x, gate.z, 14) && (!stage.inVehicle || game.player.vehicle)) {
-          active.data.gateIndex += 1;
-          game.audio.playSfx('cash', game.player.x, game.player.z);
-          if (active.data.gateIndex >= stage.checkpoints.length) {
-            game.hud.setTimer(null);
-            game.hud.setCounter(null);
-            advance();
-          } else {
-            const next = stage.checkpoints[active.data.gateIndex];
-            setBeacon(next.x, next.z);
-            game.hud.setObjective(text(stage.objective), next.x, next.z);
-          }
+      case 'damageVehicle': {
+        const v = S.target;
+        if (!v) { failMission('target-gone'); break; }
+        if (v.wrecked) { failMission('truck-destroyed'); break; }
+        if (v.integrity / v.maxIntegrity < st.below) {
+          v.traffic = false;
+          v.speed = 0;
+          advanceStage();
         }
         break;
       }
-      case 'escape': {
-        if (game.player.vehicle && game.player.vehicle.integrity < stage.requireVehicleIntact) {
-          failActive('vehicleDestroyed');
-          return;
-        }
-        if (playerAt(stage.x, stage.z, stage.radius)) {
-          if (game.wanted.stars === 0) advance();
-          else if (!active.data.warned) {
-            active.data.warned = true;
-            game.hud.notify(game.lang('losePoliceFirst'), 'bad');
-          }
-        }
+      case 'defeat':
+      case 'defend':
+        // Completion is driven by the ped-down handler above.
         break;
-      }
-      case 'enterVehicle': {
-        if (targetVehicle && targetVehicle.wrecked) {
-          failActive('vehicleDestroyed');
-          return;
-        }
-        if (game.player.vehicle === targetVehicle) advance();
+      case 'dialog':
+      case 'choice':
+        // Completion is driven by the dialog callbacks.
         break;
-      }
       default:
         break;
     }
+    void ctx;
   }
 
-  // Busted/wasted failure is handled inside wanted.js, which calls
-  // failActive directly — no duplicate listeners here.
+  function waypoint() {
+    const st = currentStage();
+    if (!st) return null;
+    // Moving targets first: the marker follows the live target, not
+    // the stage's spawn point. The truck spawns on the nearest road
+    // (tens of metres from the stage point) and then drives away; a
+    // static marker would send the player to an empty building.
+    if ((st.kind === 'chase' || st.kind === 'damageVehicle') && state.stageState.target) {
+      return { x: state.stageState.target.x, z: state.stageState.target.z };
+    }
+    if (st.x !== undefined && st.z !== undefined) return { x: st.x, z: st.z };
+    return null;
+  }
+
+  function objectiveText() {
+    const m = currentMission();
+    const st = currentStage();
+    if (!m || !st) return null;
+    let text = pickText(st.text, lang());
+    if (st.kind === 'deliver' || st.kind === 'race') {
+      text += ` — ${Math.max(0, Math.ceil(state.stageState.timeLeft))}s`;
+    }
+    if (st.kind === 'defeat' || st.kind === 'defend') {
+      const left = st.count - (state.stageState.kills || 0);
+      text += ` (${Math.max(0, left)} tersisa)`;
+    }
+    return { mission: pickText(m.title, lang()), text };
+  }
 
   return {
-    get active() { return active; },
-    get suppressHeat() { return suppressHeat; },
-    set suppressHeat(value) { suppressHeat = value; },
-    startMission, failActive, cancelActive, nextMission, availableAt, onInteract, update,
-    get characters() { return CHARACTERS; },
-    pois: POIS,
+    state,
+    missions: MISSIONS,
+    update,
+    startMission,
+    currentMission,
+    currentStage,
+    waypoint,
+    objectiveText,
+    failMission,
+    get active() { return currentMission(); },
+    get progress() {
+      return { completed: state.completed.length, total: MISSIONS.length, storyComplete: state.storyComplete, ending: state.ending };
+    },
   };
 }

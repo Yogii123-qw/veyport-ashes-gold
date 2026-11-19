@@ -1,242 +1,238 @@
-// Story dialog: procedural portraits drawn from each character's
-// colors, typewriter text with a tick, choices that change the world,
-// and a log so any line can be re-read from the pause menu. While a
-// conversation runs, the world waits — nobody shoots mid-sentence.
+// dialogs.js — story dialogs with typewriter text and real choices.
+//
+// A dialog is a portrait, a name, and lines that type out letter by
+// letter. Choices are real buttons AND keyboard-selectable, and a dialog
+// can never soft-lock the game: every choice list has a marked default,
+// Esc/Enter takes the default, and after 25 seconds the default is taken
+// automatically with an honest notice. The log keeps every line so the
+// player can re-read the story. Portraits are procedural canvas faces —
+// no image files, no network.
 
-import { CHARACTERS } from '../data/missionsData.js';
-import { formatClock } from './utils.js';
+import { pickText } from './langData.js';
 
-const CHARS_PER_SECOND = 45;
+const CHOICE_TIMEOUT = 25; // seconds before the default is auto-taken
 
-export function createDialogs(game) {
-  const $ = (id) => document.getElementById(id);
-  const root = $('dialog');
-  const speakerEl = $('speaker');
-  const textEl = $('dialogText');
-  const choicesEl = $('dialogChoices');
-  const portrait = $('portraitCanvas');
-  const pctx = portrait.getContext('2d');
+/** A procedural portrait: coloured shoulders + a face + an initial. */
+function drawPortrait(canvas, name, hue) {
+  const g = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  g.fillStyle = `hsl(${hue}, 35%, 22%)`;
+  g.fillRect(0, 0, w, h);
+  // Shoulders.
+  g.fillStyle = `hsl(${hue}, 45%, 38%)`;
+  g.beginPath();
+  g.moveTo(0, h);
+  g.quadraticCurveTo(w / 2, h * 0.42, w, h);
+  g.closePath();
+  g.fill();
+  // Face.
+  g.fillStyle = '#c89878';
+  g.beginPath();
+  g.arc(w / 2, h * 0.42, w * 0.26, 0, Math.PI * 2);
+  g.fill();
+  // Hair.
+  g.fillStyle = `hsl(${hue}, 30%, 14%)`;
+  g.beginPath();
+  g.arc(w / 2, h * 0.34, w * 0.26, Math.PI, 0);
+  g.fill();
+  // Eyes.
+  g.fillStyle = '#111';
+  g.beginPath(); g.arc(w / 2 - w * 0.1, h * 0.42, 3, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(w / 2 + w * 0.1, h * 0.42, 3, 0, Math.PI * 2); g.fill();
+  // Initial.
+  g.fillStyle = 'rgba(255,255,255,0.85)';
+  g.font = `bold ${Math.round(w * 0.2)}px sans-serif`;
+  g.textAlign = 'center';
+  g.fillText((name || '?')[0].toUpperCase(), w / 2, h * 0.94);
+}
 
-  let lines = [];
-  let lineIndex = 0;
-  let shown = 0;
-  let typing = false;
-  let onDone = null;
-  let open = false;
-  let choicesOpen = false;
-  let choiceKeyListener = null;
+export function createDialogs(deps = {}) {
+  const boxEl = document.getElementById('dialogBox');
+  const nameEl = document.getElementById('dialogName');
+  const textEl = document.getElementById('dialogText');
+  const choicesEl = document.getElementById('dialogChoices');
+  const skipEl = document.getElementById('dialogSkip');
+  const portraitEl = document.getElementById('dialogPortrait');
+  const audio = deps.audio || null;
+  const lang = () => deps.getLang ? deps.getLang() : 'id';
+
   const log = [];
-
-  function drawPortrait(who) {
-    const character = CHARACTERS[who] || CHARACTERS.rook;
-    const width = 96;
-    const height = 96;
-    pctx.clearRect(0, 0, width, height);
-    const gradient = pctx.createLinearGradient(0, 0, 0, height);
-    gradient.addColorStop(0, character.coat);
-    gradient.addColorStop(1, '#101820');
-    pctx.fillStyle = gradient;
-    pctx.fillRect(0, 0, width, height);
-    // Shoulders.
-    pctx.fillStyle = character.coat;
-    pctx.beginPath();
-    pctx.moveTo(8, 96);
-    pctx.quadraticCurveTo(48, 58, 88, 96);
-    pctx.closePath();
-    pctx.fill();
-    // Neck + head.
-    pctx.fillStyle = character.skin;
-    pctx.fillRect(40, 52, 16, 14);
-    pctx.beginPath();
-    pctx.ellipse(48, 40, 19, 23, 0, 0, Math.PI * 2);
-    pctx.fill();
-    // Hair by character.
-    pctx.fillStyle = character.hair;
-    if (who === 'ilex') {
-      pctx.beginPath();
-      pctx.ellipse(48, 26, 21, 14, 0, Math.PI, Math.PI * 2);
-      pctx.fill();
-      pctx.fillRect(26, 26, 5, 34);
-      pctx.fillRect(65, 26, 5, 34);
-    } else if (who === 'pell') {
-      // Police cap.
-      pctx.fillStyle = '#22303f';
-      pctx.fillRect(28, 16, 40, 10);
-      pctx.fillRect(24, 24, 48, 5);
-      pctx.fillStyle = '#ffc35c';
-      pctx.fillRect(44, 18, 8, 6);
-    } else if (who === 'vex') {
-      pctx.beginPath();
-      pctx.moveTo(29, 34);
-      pctx.quadraticCurveTo(34, 12, 48, 16);
-      pctx.quadraticCurveTo(64, 12, 67, 34);
-      pctx.quadraticCurveTo(56, 22, 48, 24);
-      pctx.quadraticCurveTo(40, 22, 29, 34);
-      pctx.fill();
-    } else if (who === 'drayke') {
-      pctx.beginPath();
-      pctx.ellipse(48, 22, 19, 10, 0, Math.PI, Math.PI * 2);
-      pctx.fill();
-      pctx.fillRect(30, 52, 36, 8);
-    } else {
-      pctx.beginPath();
-      pctx.ellipse(48, 22, 19, 11, 0, Math.PI, Math.PI * 2);
-      pctx.fill();
-    }
-    // Eyes.
-    pctx.fillStyle = '#1c1c1c';
-    pctx.fillRect(37, 38, 5, 3);
-    pctx.fillRect(54, 38, 5, 3);
-    // Mouth.
-    pctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    pctx.lineWidth = 2;
-    pctx.beginPath();
-    pctx.moveTo(41, 53);
-    pctx.lineTo(55, 53);
-    pctx.stroke();
-    if (who === 'vex') {
-      // Scar over the left brow.
-      pctx.strokeStyle = 'rgba(120,20,20,0.8)';
-      pctx.beginPath();
-      pctx.moveTo(36, 30);
-      pctx.lineTo(42, 40);
-      pctx.stroke();
-    }
-    if (who === 'ilex') {
-      pctx.fillStyle = '#ffc35c';
-      pctx.beginPath();
-      pctx.arc(28, 48, 2.5, 0, Math.PI * 2);
-      pctx.arc(68, 48, 2.5, 0, Math.PI * 2);
-      pctx.fill();
-    }
-  }
-
-  function currentText() {
-    const line = lines[lineIndex];
-    return line[game.settings.language] || line.en;
-  }
+  let open = false;
+  let lines = [];
+  let lineIdx = 0;
+  let charIdx = 0;
+  let typing = false;
+  let typeTimer = 0;
+  let currentChoices = null;
+  let choiceTimer = 0;
+  let onDone = null;
+  let onChoice = null;
 
   function showLine() {
-    const line = lines[lineIndex];
-    const character = CHARACTERS[line.who] || CHARACTERS.rook;
-    speakerEl.textContent = character.name[game.settings.language] || character.name.en;
-    drawPortrait(line.who);
-    shown = 0;
-    typing = true;
+    const line = lines[lineIdx];
+    nameEl.textContent = pickText(line.speaker, lang()) || line.speaker;
+    if (line.portrait) drawPortrait(portraitEl, pickText(line.speaker, lang()), line.portrait);
     textEl.textContent = '';
-    choicesEl.innerHTML = '';
+    charIdx = 0;
+    typing = true;
+    typeTimer = 0;
   }
 
-  function play(nextLines, done) {
-    if (choiceKeyListener) {
-      document.removeEventListener('keydown', choiceKeyListener);
-      choiceKeyListener = null;
-    }
-    lines = nextLines;
-    lineIndex = 0;
-    onDone = done || null;
+  /** Show a dialog. `opts.lines` is [{speaker, text, portrait}];
+   *  `opts.choices` is [{label, value, default}] shown after the last
+   *  line; `opts.onChoice(value)` fires for the picked value. */
+  function show(opts) {
+    lines = opts.lines || [];
+    lineIdx = 0;
+    onDone = opts.onDone || null;
+    onChoice = opts.onChoice || null;
+    currentChoices = null;
+    choiceTimer = 0;
+    pendingChoices = opts.choices || pendingChoices || null;
+    choicesEl.innerHTML = '';
+    choicesEl.classList.add('hidden');
+    boxEl.classList.remove('hidden');
     open = true;
-    choicesOpen = false;
-    root.classList.remove('hidden');
-    game.dialogOpen = true;
-    showLine();
+    if (lines.length) showLine();
+    else finishLines();
+  }
+
+  function finishLines() {
+    typing = false;
+    if (currentChoices === null && pendingChoices) {
+      showChoices(pendingChoices);
+      pendingChoices = null;
+      return;
+    }
+    close();
+  }
+
+  let pendingChoices = null;
+
+  function showChoices(choices) {
+    currentChoices = choices;
+    choiceTimer = CHOICE_TIMEOUT;
+    choicesEl.innerHTML = '';
+    choicesEl.classList.remove('hidden');
+    choices.forEach((c, i) => {
+      const b = document.createElement('button');
+      b.className = 'choiceBtn' + (c.default ? ' default' : '');
+      b.textContent = pickText(c.label, lang());
+      b.addEventListener('click', () => pick(i));
+      choicesEl.appendChild(b);
+    });
+  }
+
+  function pick(i) {
+    const c = currentChoices && currentChoices[i];
+    if (!c) return;
+    const value = c.value;
+    currentChoices = null;
+    choicesEl.classList.add('hidden');
+    close();
+    if (onChoice) onChoice(value);
+  }
+
+  function pickDefault() {
+    if (!currentChoices) return;
+    const idx = currentChoices.findIndex((c) => c.default);
+    pick(idx >= 0 ? idx : 0);
   }
 
   function close() {
     open = false;
-    choicesOpen = false;
-    root.classList.add('hidden');
-    game.dialogOpen = false;
-    const done = onDone;
-    onDone = null;
-    if (done) done();
+    boxEl.classList.add('hidden');
+    if (onDone) {
+      const fn = onDone;
+      onDone = null;
+      fn();
+    }
   }
 
+  /** Advance: finish typing the line, or move to the next one. */
   function advance() {
-    if (!open || choicesOpen) return;
-    const full = currentText();
+    if (!open) return;
     if (typing) {
-      shown = full.length;
-      textEl.textContent = full;
+      // Finish the line instantly.
+      textEl.textContent = pickText(lines[lineIdx].text, lang());
       typing = false;
       return;
     }
-    logLine(lines[lineIndex].who, full);
-    lineIndex += 1;
-    if (lineIndex >= lines.length) {
-      close();
-    } else {
+    const line = lines[lineIdx];
+    if (line) log.push({ speaker: pickText(line.speaker, lang()), text: pickText(line.text, lang()) });
+    lineIdx += 1;
+    if (lineIdx < lines.length) {
       showLine();
+    } else {
+      finishLines();
     }
-  }
-
-  function showChoices(choices, onPick) {
-    // Choices arrive after the lines finish, which closes the dialog:
-    // re-open it, or the buttons render inside a hidden box and the
-    // player is soft-locked with no visible way forward.
-    open = true;
-    game.dialogOpen = true;
-    root.classList.remove('hidden');
-    choicesOpen = true;
-    choicesEl.innerHTML = '';
-    const buttons = [];
-    // Number keys 1-9 pick a choice, so keyboard players never need
-    // the mouse mid-conversation. The listener removes itself the
-    // moment the choice is made or the dialog closes.
-    const onKey = (event) => {
-      const index = Number(event.key) - 1;
-      if (Number.isInteger(index) && index >= 0 && index < buttons.length) {
-        event.preventDefault();
-        buttons[index].click();
-      }
-    };
-    choiceKeyListener = onKey;
-    document.addEventListener('keydown', onKey);
-    for (const [i, choice] of choices.entries()) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'choiceBtn';
-      button.textContent = `${i + 1}. ${choice.label[game.settings.language] || choice.label.en}`;
-      button.addEventListener('click', () => {
-        document.removeEventListener('keydown', onKey);
-        choiceKeyListener = null;
-        game.audio.playSfx('click', game.player.x, game.player.z);
-        choicesEl.innerHTML = '';
-        choicesOpen = false;
-        close();
-        onPick(choice);
-      });
-      buttons.push(button);
-      choicesEl.appendChild(button);
-    }
-  }
-
-  function logLine(who, text) {
-    log.unshift({ who, text, time: formatClock(game.weather.hours) });
-    if (log.length > 60) log.length = 60;
   }
 
   function update(dt) {
-    if (!open || !typing) return;
-    const full = currentText();
-    const next = shown + CHARS_PER_SECOND * dt;
-    if (Math.floor(next / 2) !== Math.floor(shown / 2)) {
-      game.audio.playSfx('type', game.player.x, game.player.z);
+    if (!open) return;
+    if (typing) {
+      typeTimer += dt;
+      const line = lines[lineIdx];
+      const full = pickText(line.text, lang());
+      const want = Math.floor(typeTimer / 0.018);
+      if (want > charIdx) {
+        charIdx = Math.min(full.length, want);
+        textEl.textContent = full.slice(0, charIdx);
+        if (audio && charIdx % 3 === 0) audio.play('type');
+        if (charIdx >= full.length) typing = false;
+      }
     }
-    shown = Math.min(full.length, next);
-    textEl.textContent = full.slice(0, Math.floor(shown));
-    if (shown >= full.length) typing = false;
+    if (currentChoices) {
+      choiceTimer -= dt;
+      if (choiceTimer <= 0) {
+        // Anti-soft-lock: the default is taken, honestly announced.
+        if (deps.notify) deps.notify('choiceTimeout');
+        pickDefault();
+      }
+    }
   }
 
-  root.addEventListener('click', (event) => {
-    if (event.target.closest('.choiceBtn')) return;
+  // Click the box to advance; skip jumps past the typewriter.
+  boxEl.addEventListener('click', (e) => {
+    if (e.target.closest('#dialogChoices') || e.target.closest('button')) return;
     advance();
+  });
+  skipEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (currentChoices) { pickDefault(); return; }
+    // Skip the rest of the lines, straight to the choices (if any).
+    while (lineIdx < lines.length - 1) lineIdx += 1;
+    if (lineIdx < lines.length) {
+      const line = lines[lineIdx];
+      log.push({ speaker: pickText(line.speaker, lang()), text: pickText(line.text, lang()) });
+    }
+    lineIdx = lines.length;
+    finishLines();
+  });
+  window.addEventListener('keydown', (e) => {
+    if (!open) return;
+    if (e.code === 'Escape' || e.code === 'Enter') {
+      if (currentChoices) pickDefault();
+      else advance();
+    }
+    if (currentChoices && e.code.startsWith('Digit')) {
+      const n = Number(e.code.slice(5)) - 1;
+      if (currentChoices[n]) pick(n);
+    }
   });
 
   return {
-    play, advance, showChoices, logLine, update,
+    show,
+    advance,
+    close,
+    update,
+    pickDefault,
     get isOpen() { return open; },
-    get entries() { return log; },
-    get typing() { return typing; },
+    get log() { return log; },
+    /** Queue choices to show after the lines finish. */
+    withChoices(choices) {
+      pendingChoices = choices;
+    },
   };
 }

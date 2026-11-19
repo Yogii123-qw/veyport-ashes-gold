@@ -1,497 +1,506 @@
-// VEYPORT: Ashes & Gold — boot, wiring, and the fixed-step loop.
-// Every system is built once, in dependency order, around one shared
-// `game` object. The loop steps gameplay at a fixed 60 Hz, renders
-// every animation frame, and routes input, interaction scanning and
-// camera work from here. Nothing in this file invents game rules —
-// those live in the systems and the data files.
+// main.js — boot, the fixed-timestep loop, screens, and the wiring.
+//
+// This module is deliberately thin: it owns the renderer, the screen
+// state, and the per-frame step that calls every system in the right
+// order. The systems themselves own their behaviour (HUD in hud.js,
+// minimap in minimap.js, menus in menus.js, missions in missions.js,
+// wanted in wanted.js, combat in combat.js, audio in audio.js).
+// Nothing here touches the network: every file is local, every number
+// on the HUD is bound to real state.
+//
+// Screens: menu (cinematic orbit over the real city) -> play -> pause /
+// shop / map. The simulation runs at a fixed 60 Hz; rendering is free.
+// While a dialog is open the simulation freezes — the player cannot act
+// during a conversation, so neither can the world.
 
-import * as THREE from 'three';
-import { textFor } from '../data/langData.js';
-import { PLAYER_SPAWN, POIS, poiById } from '../data/cityData.js';
-import { createEventBus } from './events.js';
-import { createRoadGraph } from './roadgraph.js';
-import { createPhysics } from './physics.js';
-import { createCity } from './city.js';
-import { createParticles } from './particles.js';
-import { createAudio } from './audio.js';
+import * as THREE from '../vendor/three.min.js';
+import { t } from './langData.js';
+import { createCity, LANDMARKS } from './city.js';
+import { createVehicles } from './vehicles.js';
+import { vehicleName } from './vehiclesData.js';
+import { createPlayer, WEAPONS, weaponName } from './player.js';
 import { createInput } from './input.js';
 import { createCameraRig } from './camera.js';
-import { createVehicles } from './vehicles.js';
-import { createPedestrians } from './pedestrians.js';
-import { createPlayer } from './player.js';
-import { createWanted } from './wanted.js';
-import { createCombat } from './combat.js';
-import { createTraffic } from './traffic.js';
-import { createGangs } from './gangs.js';
-import { createPolice } from './police.js';
-import { createWeather } from './weather.js';
+import { createWeather, WEATHERS } from './weather.js';
 import { createEconomy } from './economy.js';
+import { createAudio } from './audio.js';
+import { createEffects } from './effects.js';
+import { createPedestrians } from './pedestrians.js';
+import { createCombat } from './combat.js';
+import { createWanted } from './wanted.js';
+import { createDialogs } from './dialogs.js';
 import { createMissions } from './missions.js';
 import { createContracts } from './contracts.js';
 import { createSave } from './save.js';
+import { createUI } from './ui.js';
 import { createHud } from './hud.js';
 import { createMinimap } from './minimap.js';
-import { createDialogs } from './dialogs.js';
 import { createMenus } from './menus.js';
-import { stageShot } from './shots.js';
-import { dist2, mulberry32 } from './utils.js';
 
 const STEP = 1 / 60;
+const MAX_FRAME = 0.25;
+const AUTOSAVE_EVERY = 45; // seconds of play between autosaves (slot 1)
 
-function newProgress() {
+/** Tiny event bus: systems announce, others react. No hidden coupling. */
+function createBus() {
+  const handlers = new Map();
   return {
-    money: 300,
-    ledger: [],
-    stats: {
-      playSeconds: 0, kills: 0, carsStolen: 0, distanceWalked: 0, distanceDriven: 0,
-      shots: 0, hits: 0, hpLost: 0, moneyEarned: 0, moneySpent: 0,
-      missionsCompleted: 0, missionsFailed: 0, contractsCompleted: 0,
+    on(evt, fn) {
+      if (!handlers.has(evt)) handlers.set(evt, []);
+      handlers.get(evt).push(fn);
     },
-    reputation: { harbormen: 50, foundry: 50 },
-    contractRep: 50,
-    flags: {
-      safehouse: false, contactDrayke: false, freeRespray: 0, heavyArmor: false,
-      garageUpgraded: false, armoryUpgraded: false, lastRefillDay: -1, debtResolved: false,
+    emit(evt, data) {
+      const list = handlers.get(evt);
+      if (list) for (const fn of list) fn(data);
     },
-    garage: [],
-    cachesTaken: new Set(),
-    stunts: {},
-    trials: {},
-    missionsCompleted: new Set(),
-    contractsCompleted: 0,
-    contractSeed: 7,
-    ending: null,
   };
 }
 
-function boot() {
-  const params = new URLSearchParams(window.location.search);
-  const shotName = params.get('shot');
-  const seed = Number(params.get('seed')) || 99;
-  const loadingFill = document.getElementById('loadingFill');
-  const loadingText = document.getElementById('loadingText');
-  const setProgress = (pct, text) => {
-    loadingFill.style.width = `${pct}%`;
-    if (text) loadingText.textContent = text;
-  };
+const params = new URLSearchParams(window.location.search);
+const autostart = params.get('autostart') === '1';
 
-  const canvas = document.getElementById('gl');
-  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.05;
-
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xbfd8e8);
-
-  const game = {
-    canvas, scene, renderer,
-    time: 0,
-    dialogOpen: false,
-    mode: 'menu',
-    settings: {
-      language: 'en', master: 80, sfx: 80, music: 60, ambient: 60,
-      sensitivity: 100, quality: 'auto', touch: 'auto', reduceShake: false, colorblind: false,
-    },
-    progress: newProgress(),
-  };
-  game.lang = (key) => textFor(game.settings.language, key);
-  game.events = createEventBus();
-  game.roadgraph = createRoadGraph();
-  game.physics = createPhysics(game);
-  setProgress(35, 'Building the city…');
-  game.city = createCity(game);
-  setProgress(60, 'Waking the harbor…');
-  game.particles = createParticles(game);
-  game.audio = createAudio(game);
-  game.input = createInput(game);
-  game.cameraRig = createCameraRig(game);
-  game.vehicles = createVehicles(game);
-  game.pedestrians = createPedestrians(game);
-  game.player = createPlayer(game);
-  game.wanted = createWanted(game);
-  game.combat = createCombat(game);
-  game.traffic = createTraffic(game);
-  game.gangs = createGangs(game);
-  game.police = createPolice(game);
-  game.weather = createWeather(game);
-  game.economy = createEconomy(game);
-  game.missions = createMissions(game);
-  game.contracts = createContracts(game);
-  game.save = createSave(game);
-  game.hud = createHud(game);
-  game.minimap = createMinimap(game);
-  game.dialogs = createDialogs(game);
-  game.menus = createMenus(game);
-  game.ui = game.menus;
-
-  // Adaptive quality: shadows, resolution and crowd density step down
-  // when the frame rate falls, and step back up when it recovers.
-  const QUALITY_LEVELS = {
-    high: { ped: 32, traffic: 18, shadow: true, shadowSize: 2048, pixelRatio: Math.min(window.devicePixelRatio || 1, 2) },
-    medium: { ped: 24, traffic: 14, shadow: true, shadowSize: 1024, pixelRatio: Math.min(window.devicePixelRatio || 1, 1.5) },
-    low: { ped: 14, traffic: 8, shadow: false, shadowSize: 1024, pixelRatio: 1 },
-  };
-  const quality = {
-    level: 'high',
-    auto: true,
-    fpsEma: 60,
-    adjustTimer: 0,
-    get pedCap() { return QUALITY_LEVELS[this.level].ped; },
-    get trafficCap() { return QUALITY_LEVELS[this.level].traffic; },
-    apply(name) {
-      if (name === 'auto') {
-        this.auto = true;
-        this.applyLevel('high');
-        return;
-      }
-      this.auto = false;
-      this.applyLevel(name);
-    },
-    applyLevel(name) {
-      this.level = name;
-      const spec = QUALITY_LEVELS[name];
-      game.city.setShadowQuality(spec.shadow, spec.shadowSize);
-      renderer.setPixelRatio(spec.pixelRatio);
-      renderer.setSize(window.innerWidth, window.innerHeight);
-    },
-    update(dt, fps) {
-      if (!this.auto) return;
-      this.fpsEma += (fps - this.fpsEma) * Math.min(1, dt * 0.8);
-      this.adjustTimer += dt;
-      if (this.adjustTimer < 3) return;
-      this.adjustTimer = 0;
-      if (this.fpsEma < 28 && this.level !== 'low') {
-        this.applyLevel(this.level === 'high' ? 'medium' : 'low');
-      } else if (this.fpsEma > 55 && this.level !== 'high') {
-        this.applyLevel(this.level === 'low' ? 'medium' : 'high');
-      }
-    },
-  };
-  game.quality = quality;
-
-  // Headlight: one spotlight that follows the player's car at night.
-  const headlight = new THREE.SpotLight(0xfff2cc, 0, 55, 0.5, 0.45, 1.2);
-  scene.add(headlight);
-  scene.add(headlight.target);
-
-  game.save.loadSettings();
-  game.hud.applyI18n();
-  quality.apply(game.settings.quality);
-
-  // Touch weapon bar: one button per owned weapon.
-  const touchWeaponsEl = document.getElementById('touchWeapons');
-  let touchWeaponSig = '';
-  function renderTouchWeapons() {
-    const owned = Object.keys(game.player.weapons);
-    const sig = `${owned.join(',')}|${game.player.currentWeapon}`;
-    if (sig === touchWeaponSig) return;
-    touchWeaponSig = sig;
-    touchWeaponsEl.innerHTML = '';
-    for (const id of owned) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = `tBtn small${id === game.player.currentWeapon ? ' current' : ''}`;
-      btn.textContent = id.toUpperCase();
-      btn.addEventListener('click', () => {
-        game.player.currentWeapon = id;
-        game.audio.playSfx('click');
-        renderTouchWeapons();
-      });
-      touchWeaponsEl.appendChild(btn);
-    }
-  }
-
-  function applyTouchVisibility() {
-    const coarse = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
-    const show = game.mode === 'playing' && (game.settings.touch === 'on' || (game.settings.touch === 'auto' && (game.input.touchSeen() || coarse)));
-    document.getElementById('touch').classList.toggle('hidden', !show);
-  }
-
-  function setTouchVisible(on) {
-    document.getElementById('touch').classList.toggle('hidden', !on);
-  }
-
-  function startPlaying() {
-    game.mode = 'playing';
-    game.cameraRig.snapBehind(game.player.heading);
-    game.input.resetTransient();
-  }
-
-  function quitToMenu() {
-    game.mode = 'menu';
-    game.input.resetTransient();
-    game.audio.setMusicMode('explore');
-  }
-
-  function newGame() {
-    game.missions.cancelActive(false);
-    game.contracts.cancelActive(false);
-    game.vehicles.reset(mulberry32(seed));
-    game.pedestrians.reset();
-    game.gangs.reset();
-    game.police.reset();
-    game.combat.reset();
-    game.progress = newProgress();
-    game.player.reset(PLAYER_SPAWN);
-    game.wanted.setState(0, 0);
-    game.weather.setState(8, 'clear');
-    game.hud.clearObjective();
-    game.cameraRig.snapBehind(PLAYER_SPAWN.heading);
-    startPlaying();
-    // The gun path must be obvious without a guide: say it out loud.
-    game.hud.notify(game.lang('startingGun'), 'good');
-  }
-
-  game.main = { startPlaying, quitToMenu, newGame, applyTouchVisibility, setTouchVisible };
-
-  // Initial world state.
-  game.vehicles.reset(mulberry32(seed));
-  game.player.reset(PLAYER_SPAWN);
-  game.weather.setState(8, 'clear');
-  game.cameraRig.resize(window.innerWidth, window.innerHeight);
-  game.cameraRig.snapBehind(PLAYER_SPAWN.heading);
-  setProgress(90, 'Opening the gates…');
-
-  // ---------- interaction scanning ----------
-  function scanInteract() {
-    const player = game.player;
-    // Time trial gates.
-    if (!player.vehicle && !game.missions.active && !game.contracts.active && !game.contracts.trial) {
-      const trial = game.contracts.trialNear();
-      if (trial) {
-        return { kind: 'trial', trial, text: trial.name[game.settings.language] || trial.name.en };
-      }
-    }
-    for (const poi of POIS) {
-      const d = dist2(player.x, player.z, poi.x, poi.z);
-      if (d > 16) continue;
-      // Mission talk / mission start takes priority at its POI.
-      const mission = game.missions.availableAt(poi.id);
-      if (mission) {
-        return { kind: 'mission', poi, text: `${game.lang('talkTo')} · ${mission.title[game.settings.language] || mission.title.en}` };
-      }
-      if (game.missions.active) {
-        const stage = game.missions.active.mission.stages[game.missions.active.stageIndex];
-        if (stage && stage.type === 'talk' && stage.poi === poi.id) {
-          return { kind: 'mission', poi, text: game.lang('talkTo') };
-        }
-      }
-      if (poi.kind === 'bar' && !player.vehicle) return { kind: 'board', poi, text: game.lang('openBoard') };
-      if (poi.kind === 'gunshop' && !player.vehicle) return { kind: 'gunshop', poi, text: game.lang('openShop') };
-      if (poi.kind === 'food' && !player.vehicle) return { kind: 'food', poi, text: game.lang('eatFood') };
-      if (poi.kind === 'respray' && player.vehicle) return { kind: 'respray', poi, text: game.lang('resprayHere') };
-      if (poi.kind === 'chopshop' && player.vehicle) return { kind: 'chopshop', poi, text: game.lang('sellVehicle') };
-      if (poi.kind === 'safehouse') {
-        if (!game.progress.flags.safehouse) return { kind: 'locked', poi, text: poi.name[game.settings.language] || poi.name.en };
-        return { kind: 'safehouse', poi, text: poi.name[game.settings.language] || poi.name.en };
-      }
-      if (poi.id === 'harborHq' && game.progress.flags.contactDrayke && !player.vehicle) {
-        return { kind: 'bribe', poi, text: game.lang('bribeHere') };
-      }
-    }
-    return null;
-  }
-
-  function doInteract(target) {
-    if (!target) return;
-    if (target.kind === 'trial') {
-      game.contracts.startTrial(target.trial);
-      return;
-    }
-    if (target.kind === 'mission') {
-      game.missions.onInteract(target.poi.id);
-      return;
-    }
-    if (target.kind === 'locked') {
-      game.hud.notify(game.settings.language === 'id' ? 'Gudang Cole — belum milikmu. Selesaikan misi pertama.' : "Cole's warehouse — not yours yet. Finish the first mission.", 'bad');
-      return;
-    }
-    game.menus.openShop(target.kind);
-  }
-
-  // ---------- the loop ----------
-  let lastNow = performance.now();
-  let accumulator = 0;
-  let fpsFrames = 0;
-  let fpsTimer = 0;
-  let fps = 60;
-  let musicTimer = 0;
-  let insideSafehouse = false;
-
-  function stepGame(dt, pressed) {
-    game.time += dt;
-    // Dialog freezes the world; only the typewriter runs.
-    if (game.dialogOpen) {
-      if (pressed.has('dialogAdvance') || pressed.has('interact') || pressed.has('enter') || pressed.has('jump')) {
-        game.dialogs.advance();
-      }
-      return;
-    }
-    // Any overlay freezes the world, except pause toggling itself.
-    if (game.menus.paused || game.menus.resultsOpen || game.menus.modalOpen || game.menus.settingsOpen || game.menus.creditsOpen || game.menus.slotsOpen) {
-      if (pressed.has('pause') && game.menus.paused) game.menus.togglePause(false);
-      return;
-    }
-    if (game.mode === 'menu') {
-      game.weather.update(dt);
-      game.traffic.update(dt);
-      game.pedestrians.update(dt);
-      game.gangs.update(dt);
-      game.police.update(dt);
-      game.vehicles.update(dt);
-      game.vehicles.resolveCollisions();
-      game.particles.update(dt);
-      game.cameraRig.updateMenu(dt);
-      return;
-    }
-
-    if (pressed.has('pause')) {
-      game.menus.togglePause(true);
-      return;
-    }
-    if (pressed.has('map')) {
-      game.menus.togglePause(true);
-      game.menus.showTab('map');
-      return;
-    }
-
-    // During the WASTED crane shot the world keeps living but the
-    // player cannot interact; prompts stay hidden until respawn.
-    if (!game.wanted.wastedActive) {
-      const target = scanInteract();
-      if (pressed.has('interact')) doInteract(target);
-      if (target) game.hud.showPrompt(target.text, 'F');
-      else if (!game.player.vehicle && game.player.nearestVehicle(4.2)) {
-        const vehicle = game.player.nearestVehicle(4.2);
-        game.hud.showPrompt(vehicle.driver === 'traffic' ? game.lang('carjack') : game.lang('enterVehicle'), 'E');
-      } else if (game.player.vehicle) {
-        game.hud.showPrompt(game.lang('exitVehicle'), 'E');
-      } else {
-        game.hud.hidePrompt();
-      }
-    } else {
-      game.hud.hidePrompt();
-    }
-
-    game.player.update(dt, game.input, pressed);
-    game.vehicles.update(dt);
-    game.vehicles.resolveCollisions();
-    game.traffic.update(dt);
-    game.pedestrians.update(dt);
-    game.gangs.update(dt);
-    game.police.update(dt);
-    game.wanted.update(dt);
-    game.combat.update(dt, game.input, pressed);
-    game.missions.update(dt);
-    game.contracts.update(dt);
-    game.weather.update(dt);
-    game.particles.update(dt);
-    game.progress.stats.playSeconds += dt;
-
-    // Adaptive music: tension overrides explore, missions override all.
-    musicTimer -= dt;
-    if (musicTimer <= 0) {
-      musicTimer = 0.5;
-      if (game.missions.active || game.contracts.active) game.audio.setMusicMode('mission');
-      else if (game.wanted.stars >= 2) game.audio.setMusicMode('tension');
-      else game.audio.setMusicMode('explore');
-    }
-
-    // Safehouse entry autosaves.
-    const safehouse = poiById('safehouse');
-    const nearSafehouse = dist2(game.player.x, game.player.z, safehouse.x, safehouse.z) < 12;
-    if (nearSafehouse && !insideSafehouse && game.progress.flags.safehouse) {
-      game.save.autosave('safehouse');
-    }
-    insideSafehouse = nearSafehouse;
-
-    // Camera follows the player or the car — or runs the WASTED crane
-    // shot until the respawn flow ends it.
-    if (game.wanted.wastedActive) {
-      game.wanted.updateWasted(dt);
-    } else {
-      const focus = { x: game.player.x, y: game.player.y, z: game.player.z };
-      const heading = game.player.vehicle ? game.player.vehicle.heading : game.player.heading;
-      game.cameraRig.updateFollow(dt, focus, heading, game.player.speed, !!game.player.vehicle, game.player.aiming);
-    }
-
-    // Headlights.
-    const lightsOn = game.player.lightsOn && game.player.vehicle;
-    headlight.intensity = lightsOn ? 60 : 0;
-    if (lightsOn) {
-      const v = game.player.vehicle;
-      headlight.position.set(v.x, 2.2, v.z);
-      headlight.target.position.set(v.x + Math.sin(v.heading) * 30, 0, v.z + Math.cos(v.heading) * 30);
-      headlight.target.updateMatrixWorld();
-    }
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    const frameDt = Math.min(0.1, (now - lastNow) / 1000);
-    lastNow = now;
-    fpsFrames += 1;
-    fpsTimer += frameDt;
-    if (fpsTimer >= 0.5) {
-      fps = fpsFrames / fpsTimer;
-      fpsFrames = 0;
-      fpsTimer = 0;
-      quality.update(0.5, fps);
-    }
-    const pressed = game.input.takePressed();
-    accumulator += frameDt;
-    let steps = 0;
-    let first = true;
-    while (accumulator >= STEP && steps < 4) {
-      stepGame(STEP, first ? pressed : new Set());
-      first = false;
-      accumulator -= STEP;
-      steps += 1;
-    }
-    if (steps === 4) accumulator = 0;
-    game.dialogs.update(frameDt);
-    if (game.mode === 'playing') {
-      game.hud.update();
-      game.minimap.update(frameDt);
-      renderTouchWeapons();
-    }
-    renderer.render(scene, game.cameraRig.camera);
-  }
-
-  window.addEventListener('resize', () => {
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    game.cameraRig.resize(window.innerWidth, window.innerHeight);
-  });
-  // First gesture wakes the audio context.
-  const wakeAudio = () => game.audio.init();
-  window.addEventListener('pointerdown', wakeAudio, { once: false });
-  window.addEventListener('keydown', wakeAudio, { once: false });
-
-  // Test hooks: the playtest harness drives the game through these.
-  window.__veyport = { game, THREE, renderer, version: 1 };
-  window.__veyportReady = true;
-
-  document.getElementById('loading').remove();
-  setProgress(100);
-  if (shotName) {
-    game.menus.hideMenu();
-    startPlaying();
-    stageShot(game, shotName);
-  } else {
-    game.menus.showMenu();
-  }
-  requestAnimationFrame(frame);
-}
-
+// ---------- Settings (persisted; every option does something real) ----------
+const DEFAULT_SETTINGS = { sensitivity: 1, quality: 'high', lang: 'id', reduceShake: false };
+let settings = { ...DEFAULT_SETTINGS };
 try {
-  boot();
-} catch (error) {
-  console.error('[veyport] boot failed:', error);
-  const loadingText = document.getElementById('loadingText');
-  if (loadingText) loadingText.textContent = `Failed to start: ${error.message}`;
+  const saved = JSON.parse(window.localStorage.getItem('veyport-settings') || '{}');
+  settings = { ...DEFAULT_SETTINGS, ...saved };
+} catch { /* corrupted settings fall back to defaults */ }
+function saveSettings() {
+  try { window.localStorage.setItem('veyport-settings', JSON.stringify(settings)); } catch { /* private mode */ }
 }
+const lang = () => settings.lang;
+
+// ---------- Renderer / scene ----------
+const canvas = document.getElementById('game');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87b5e0);
+const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 1500);
+
+function applyQuality() {
+  const q = settings.quality;
+  renderer.setPixelRatio(q === 'high' ? Math.min(window.devicePixelRatio, 2) : 1);
+  renderer.shadowMap.enabled = q !== 'low';
+}
+applyQuality();
+
+function resize() {
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- Systems (creation order follows the dependency graph) ----------
+const bus = createBus();
+const audio = createAudio();
+const weather = createWeather(scene);
+const city = createCity(scene);
+const vehicles = createVehicles(scene, city, bus);
+const player = createPlayer(scene, city, vehicles, bus);
+const input = createInput();
+const cameraRig = createCameraRig(camera, city);
+const economy = createEconomy(bus);
+economy.bind(player, vehicles);
+const effects = createEffects(scene, bus);
+
+// Late-bound references: pedestrians and dialogs are created before the
+// systems they call back into, so their callbacks close over these.
+let wantedRef = null;
+let uiRef = null;
+const pedestrians = createPedestrians(scene, city, bus, {
+  damagePlayer: (amount, source) => { if (wantedRef) wantedRef.takeDamage(amount, source); },
+});
+const combat = createCombat({ city, vehicles, player, bus, effects, audio, cameraRig });
+const wanted = createWanted({ scene, city, vehicles, player, bus, cameraRig, economy, weather });
+wantedRef = wanted;
+combat.setSystems({ pedestrians, wanted });
+player.setFireHandler(combat.tryFire);
+const dialogs = createDialogs({ audio, getLang: lang, notify: (m) => { if (uiRef) uiRef.notify(m); } });
+const missions = createMissions({
+  player, vehicles, city, economy, bus, dialogs, wanted, weather, pedestrians,
+  notify: (m) => { if (uiRef) uiRef.notify(m); },
+});
+const contracts = createContracts({
+  player, vehicles, city, economy, bus, wanted,
+  notify: (m) => { if (uiRef) uiRef.notify(m); },
+});
+contracts.buildCaches(THREE, scene);
+const save = createSave({
+  player, vehicles, economy, weather, missions, contracts, wanted,
+  getSettings: () => settings,
+  onAutosave: () => { if (uiRef) uiRef.notify('autosaved'); },
+});
+const ui = createUI({ bus, economy, missions, contracts, wanted, save, getLang: lang });
+uiRef = ui;
+const hud = createHud({ player, vehicles, economy, weather, city, cameraRig, wanted, bus, getLang: lang });
+const minimap = createMinimap({ player, vehicles, city });
+const menus = createMenus({
+  economy, vehicles, weather, player, cameraRig, ui,
+  getLang: lang, getSettings: () => settings, saveSettings, applyQuality,
+});
+
+// Headlight cone for the player's car at night (one real spotlight).
+const headlight = new THREE.SpotLight(0xfff2c0, 0, 60, 0.5, 0.6, 1.4);
+const headlightTarget = new THREE.Object3D();
+scene.add(headlightTarget);
+headlight.target = headlightTarget;
+scene.add(headlight);
+
+// ---------- Screen state (kept in sync with menus.js) ----------
+let screen = 'menu'; // menu | play | pause | shop | map
+let simTime = 0;
+let prevFire = false;
+let p9NoticeShown = false;
+let autosaveTimer = AUTOSAVE_EVERY;
+
+function setScreen(s) {
+  screen = s;
+  menus.setScreen(s);
+}
+
+function startGame(fresh) {
+  if (fresh) resetGame();
+  setScreen('play');
+  document.getElementById('hud').classList.remove('hidden');
+  if (input.isTouch()) document.getElementById('touchUI').classList.remove('hidden');
+  cameraRig.setMode('foot');
+  audio.resume();
+  if (!p9NoticeShown) {
+    ui.notify('gotP9', 5000);
+    p9NoticeShown = true;
+  }
+  ui.announce('Playing Veyport.');
+}
+
+function resetGame() {
+  economy.state.cash = 500;
+  economy.state.ledger.length = 0;
+  economy.state.garage.length = 0;
+  economy.state.freeResprays = 0;
+  economy.state.safehouseLevel = 0;
+  player.state.health = 100;
+  player.state.armor = 0;
+  player.state.weapons = { fists: { owned: true, ammo: Infinity, reserve: 0, mag: Infinity } };
+  player.state.weapons.p9 = { owned: true, ammo: 12, reserve: 48, mag: 12 };
+  player.state.currentWeapon = 'p9';
+  player.syncWeaponMesh();
+  player.teleport(-452, -372, 0.6);
+  weather.setTime(9);
+  weather.state.weather = 'clear';
+  wanted.clearWanted();
+  const ms = missions.state;
+  ms.activeIndex = -1; ms.stageIdx = 0; ms.stageState = {};
+  ms.completed.length = 0; ms.choices = {};
+  ms.storyComplete = false; ms.ending = null; ms.nextDelay = 0; ms.failed = 0;
+  const cs = contracts.state;
+  cs.reputation = 0; cs.active = null; cs.offers = [];
+  cs.done = 0; cs.failed = 0; cs.cachesFound.length = 0;
+  cs.stuntBest = {}; cs.trialBest = {}; cs.contractSeq = 0;
+  hud.renderWeaponKeys();
+  autosaveTimer = AUTOSAVE_EVERY;
+}
+
+function openPause() {
+  setScreen('pause');
+}
+
+function closePause() {
+  setScreen('play');
+}
+
+menus.bindButtons({
+  newGame: () => startGame(true),
+  continueGame: () => startGame(false),
+  resume: closePause,
+  quitToMenu: () => {
+    setScreen('menu');
+    document.getElementById('hud').classList.add('hidden');
+    document.getElementById('touchUI').classList.add('hidden');
+    cameraRig.setMode('menu');
+  },
+  closeShop: () => setScreen('play'),
+  pause: openPause,
+  onLangChange: () => { hud.renderWeaponKeys(); },
+});
+minimap.bind();
+
+// ---------- Bus reactions (only what no system owns) ----------
+bus.on('hit', () => {
+  const hm = document.getElementById('hitmarker');
+  hm.classList.remove('hidden');
+  window.setTimeout(() => hm.classList.add('hidden'), 120);
+});
+bus.on('entered-vehicle', ({ vehicle }) => {
+  ui.notify('enteredCar');
+  ui.announce(vehicleName(vehicle.def, settings.lang));
+});
+bus.on('carjack', () => ui.notify('carjack'));
+bus.on('vehicle-destroyed', ({ vehicle }) => {
+  ui.notify(`${vehicleName(vehicle.def, settings.lang)} ${t('vehicleDestroyed', settings.lang)}`);
+  if (vehicles.getPlayerVehicle() === vehicle) {
+    player.state.inVehicle = false;
+    player.state.vehicle = null;
+    vehicles.setPlayerVehicle(null);
+    player.teleport(vehicle.x + 3, vehicle.z + 3, vehicle.heading);
+    cameraRig.setMode('foot');
+  }
+});
+bus.on('crash', () => cameraRig.addTrauma(settings.reduceShake ? 0.08 : 0.3));
+bus.on('wasted-start', ({ heli }) => {
+  cameraRig.setMode('wasted', { heliPos: heli });
+});
+bus.on('busted-start', () => {
+  // The player is led away; the camera stays where it is.
+});
+
+// ---------- Simulation step ----------
+const WEAPON_ORDER = ['fists', 'p9', 'kr9', 'iron12', 'vk7'];
+
+function step(dt) {
+  simTime += dt;
+  const look = input.takeLook();
+  const actions = input.takeActions();
+
+  if (actions.has('pause')) {
+    if (screen === 'play') openPause();
+    else if (screen === 'pause') closePause();
+    else if (screen === 'map' || screen === 'shop') setScreen('play');
+  }
+  if (screen !== 'play') return;
+  if (actions.has('map')) { setScreen('map'); return; }
+
+  // A dialog freezes the world: the player cannot act, so neither can it.
+  if (dialogs.isOpen) {
+    dialogs.update(dt);
+    return;
+  }
+
+  const ps = player.state;
+  const p = player.position();
+
+  // Enter / exit vehicle, or open the nearest shop.
+  if (actions.has('enter')) {
+    if (ps.inVehicle) player.exitVehicle();
+    else {
+      const shop = menus.nearestShopLandmark();
+      if (shop) menus.openShop(shop.shop);
+      else player.tryEnter();
+    }
+  }
+  if (actions.has('interact')) {
+    const shop = menus.nearestShopLandmark();
+    if (shop) menus.openShop(shop.shop);
+  }
+  if (actions.has('reload')) player.reload();
+  for (let i = 1; i <= 5; i++) {
+    if (actions.has(`weapon${i}`)) {
+      const id = WEAPON_ORDER[i - 1];
+      if (id && player.switchWeapon(id)) hud.renderWeaponKeys();
+    }
+  }
+
+  // Fire: semi-auto weapons fire on the rising edge, auto on hold.
+  const firing = input.fire && !ps.inVehicle;
+  const def = player.currentWeaponDef();
+  if (firing && def) {
+    if (def.auto) player.tryFire(camera, simTime);
+    else if (!prevFire) player.tryFire(camera, simTime);
+  }
+  prevFire = input.fire;
+
+  // Drive or walk. focusPos is where the action is (the car, when driving).
+  // player.update runs every frame: it owns the enter/exit transitions,
+  // which must keep counting down even while the player sits in the car.
+  const focusPos = ps.inVehicle && ps.vehicle ? { x: ps.vehicle.x, z: ps.vehicle.z } : p;
+  player.update(dt, input, cameraRig.yaw);
+  if (ps.inVehicle && ps.vehicle) {
+    const ctl = input.driveControls();
+    vehicles.update(dt, ctl, focusPos, weather.gripFactor);
+  } else {
+    vehicles.update(dt, { throttle: 0, steer: 0, handbrake: false }, focusPos, weather.gripFactor);
+  }
+
+  // The world systems all run on the same clock and the same focus point.
+  const ctx = { playerPos: focusPos, time: simTime };
+  pedestrians.update(dt, ctx);
+  missions.update(dt, ctx);
+  contracts.update(dt, ctx);
+  wanted.update(dt, ctx);
+  dialogs.update(dt);
+  effects.update(dt);
+  ui.update(dt);
+
+  // Camera mode follows the state.
+  if (wanted.flow === 'wasted' && cameraRig.mode !== 'wasted') {
+    cameraRig.setMode('wasted', { heliPos: wanted.heliPos });
+  } else if (wanted.flow === 'none' && cameraRig.mode === 'wasted') {
+    cameraRig.setMode('foot');
+  } else if (ps.inVehicle && cameraRig.mode !== 'drive') {
+    cameraRig.setMode('drive', { heading: ps.vehicle.heading });
+  } else if (!ps.inVehicle && cameraRig.mode === 'drive') {
+    cameraRig.setMode(ps.aim ? 'aim' : 'foot');
+  } else if (!ps.inVehicle && ps.aim && cameraRig.mode === 'foot') {
+    cameraRig.setMode('aim');
+  } else if (!ps.inVehicle && !ps.aim && cameraRig.mode === 'aim') {
+    cameraRig.setMode('foot');
+  }
+
+  const pv = vehicles.getPlayerVehicle();
+  const camCtx = {
+    playerPos: { x: ps.inVehicle && pv ? pv.x : ps.x, y: 0, z: ps.inVehicle && pv ? pv.z : ps.z },
+    heading: pv ? pv.heading : ps.heading,
+    speed: pv ? pv.speed : ps.speed,
+    topSpeed: pv ? pv.def.topSpeed : 8.5,
+    look,
+    sensitivity: settings.sensitivity,
+    aspect: camera.aspect,
+    aiming: ps.aim,
+  };
+  cameraRig.update(dt, camCtx);
+
+  // Headlight follows the player's car at night.
+  if (pv) {
+    const night = weather.nightFactor();
+    headlight.intensity = night * 120;
+    headlight.position.set(pv.x + Math.sin(pv.heading) * 2, 1.2, pv.z + Math.cos(pv.heading) * 2);
+    headlightTarget.position.set(pv.x + Math.sin(pv.heading) * 30, 0, pv.z + Math.cos(pv.heading) * 30);
+  } else {
+    headlight.intensity = 0;
+  }
+
+  // World clock + weather (centred on where the action is).
+  weather.update(dt, focusPos);
+  city.update(dt, weather.dayTime, weather.nightFactor());
+
+  // Audio follows the car, the weather, the sirens and the story.
+  let sirenPan = 0;
+  if (wanted.police.length) {
+    let nearest = null;
+    let nearestD = Infinity;
+    for (const u of wanted.police) {
+      const d = Math.hypot(u.x - p.x, u.z - p.z);
+      if (d < nearestD) { nearestD = d; nearest = u; }
+    }
+    if (nearest) sirenPan = Math.max(-1, Math.min(1, (nearest.x - p.x) / 60));
+  }
+  audio.update(dt, {
+    rpmFrac: pv ? Math.abs(pv.speed) / pv.def.topSpeed : 0,
+    engineKind: pv ? pv.def.engine : 'mid',
+    rainLevel: WEATHERS[weather.weather].rain,
+    siren: wanted.stars > 0,
+    sirenPan,
+    inMission: !!missions.active,
+    wanted: wanted.stars,
+  });
+
+  // Autosave (slot 1) while playing.
+  autosaveTimer -= dt;
+  if (autosaveTimer <= 0) {
+    autosaveTimer = AUTOSAVE_EVERY;
+    save.autosave();
+  }
+
+  // Interact prompt.
+  const prompt = document.getElementById('interactPrompt');
+  const nearVehicle = !ps.inVehicle && vehicles.nearestVehicle(ps.x, ps.z, 4.5);
+  const shop = menus.nearestShopLandmark();
+  if (shop) {
+    prompt.textContent = `${t('openShop', settings.lang)} — ${LANDMARKS[shop.key].label[settings.lang] || LANDMARKS[shop.key].label.en} (F)`;
+    prompt.classList.remove('hidden');
+  } else if (nearVehicle) {
+    prompt.textContent = `${t('enterVehicle', settings.lang)} — ${vehicleName(nearVehicle.def, settings.lang)} (E)`;
+    prompt.classList.remove('hidden');
+  } else {
+    prompt.classList.add('hidden');
+  }
+
+  hud.update();
+  minimap.update(performance.now(), {
+    waypoint: missions.waypoint(),
+    contractWp: contracts.active ? contracts.waypoint() : null,
+    police: wanted.stars > 0 ? wanted.police : null,
+    full: screen === 'map',
+  });
+}
+
+// ---------- Main loop ----------
+let last = performance.now();
+let accumulator = 0;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const frameDt = Math.min((now - last) / 1000, MAX_FRAME);
+  last = now;
+  if (screen === 'play') {
+    accumulator += frameDt;
+    while (accumulator >= STEP) {
+      step(STEP);
+      accumulator -= STEP;
+      if (screen !== 'play') { accumulator = 0; break; }
+    }
+  } else if (screen === 'menu') {
+    // The menu orbits the live city; the world itself stays frozen.
+    cameraRig.update(frameDt, { playerPos: { x: 0, y: 0, z: 0 }, look: { dx: 0, dy: 0 }, aspect: camera.aspect });
+    effects.update(frameDt);
+  }
+  renderer.render(scene, camera);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && screen === 'play') openPause();
+});
+
+// ---------- Boot ----------
+hud.renderWeaponKeys();
+cameraRig.setMode('menu');
+ui.announce('Veyport: Ashes and Gold. Press New Game to start.');
+if (autostart) startGame(true);
+else if (params.get('pos')) {
+  const [x, z] = params.get('pos').split(',').map(Number);
+  if (Number.isFinite(x) && Number.isFinite(z)) player.teleport(x, z, 0);
+}
+requestAnimationFrame(frame);
+
+// Test hooks (read-only state for the automated playtest).
+window.__veyport = {
+  version: 2,
+  get screen() { return screen; },
+  get cash() { return economy.cash; },
+  get time() { return simTime; }, // game seconds since New Game (fixed-step clock)
+  camera,
+  get drawCalls() { return renderer.info.render.calls; },
+  get triangles() { return renderer.info.render.triangles; },
+  player,
+  vehicles,
+  economy,
+  weather,
+  city,
+  cameraRig,
+  input,
+  wanted,
+  missions,
+  contracts,
+  dialogs,
+  save,
+  ui,
+  hud,
+  minimap,
+  menus,
+  combat,
+  pedestrians,
+  audio,
+  effects,
+  startGame,
+  setScreen,
+  showNotice: (msg, ms) => ui.notify(msg, ms),
+  get settings() { return settings; },
+};

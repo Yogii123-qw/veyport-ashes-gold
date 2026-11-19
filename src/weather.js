@@ -1,191 +1,255 @@
-// The sky over Veyport: an 18-minute day, a sun that warms and cools
-// with the hour, and four weathers on a Markov chain that change grip,
-// visibility, heat decay and sound. The forecast in the pause menu is
-// the same chain run forward, so it is a real prediction, not a prop.
+// weather.js — the 18-minute day and the four weathers, rewritten in phase 2.
+//
+// One game day = 18 real minutes (SPEC §3.5). The sun moves on a real
+// arc: white-hot at noon, orange at dusk, moonlight at night; street
+// lights and lit windows come on after dark (city.js reads
+// nightFactor). Weather is a Markov chain — clear tends to hold, storms
+// are rare and short — and it changes the game: rain cuts grip to 0.85
+// and police sight by 20%, storm cuts grip to 0.75 and sight by 35%.
+// The public API is unchanged from phase 1 (dayTime fraction, setTime
+// in hours, forecast() as a method, gripFactor / sightFactor as
+// getters, nightFactor() as a method); this rewrite splits the update
+// into named steps, adds a wind vector the rain leans into, and adds
+// forceWeather() for missions and the menu.
 
-import { clamp, lerp, mulberry32 } from './utils.js';
+import * as THREE from '../vendor/three.min.js';
 
-const DAY_SECONDS = 18 * 60;
-const WEATHERS = ['clear', 'cloudy', 'rain', 'storm'];
-const TRANSITIONS = {
-  clear: { clear: 0.72, cloudy: 0.2, rain: 0.07, storm: 0.01 },
-  cloudy: { clear: 0.3, cloudy: 0.45, rain: 0.22, storm: 0.03 },
-  rain: { clear: 0.18, cloudy: 0.32, rain: 0.4, storm: 0.1 },
-  storm: { clear: 0.1, cloudy: 0.3, rain: 0.45, storm: 0.15 },
+export const DAY_LENGTH = 1080; // seconds per game day
+
+export const WEATHERS = {
+  clear: { grip: 1.0, sight: 1.0, fog: 0.00045, rain: 0, label: { en: 'Clear', id: 'Cerah' } },
+  cloudy: { grip: 1.0, sight: 0.95, fog: 0.0007, rain: 0, label: { en: 'Cloudy', id: 'Berawan' } },
+  rain: { grip: 0.85, sight: 0.8, fog: 0.0011, rain: 1, label: { en: 'Rain', id: 'Hujan' } },
+  storm: { grip: 0.75, sight: 0.65, fog: 0.0016, rain: 2, label: { en: 'Storm', id: 'Badai' } },
 };
-const GRIP = { clear: 1, cloudy: 1, rain: 0.85, storm: 0.75 };
-const VISION = { clear: 1, cloudy: 0.95, rain: 0.8, storm: 0.65 };
-const RAIN_INTENSITY = { clear: 0, cloudy: 0, rain: 0.6, storm: 1 };
-const SKY_GRAY = { clear: 0, cloudy: 0.25, rain: 0.45, storm: 0.7 };
 
-export function createWeather(game) {
-  let hours = 8;
-  let current = 'clear';
-  let previous = 'clear';
-  let blend = 1;
-  let rollTimer = 25;
-  let lightningTimer = 8 + Math.random() * 10;
-  let flash = 0;
-  let nightFactor = 0;
-  let chainSeed = 4242;
+// Row = current weather, columns = next. Clear holds; storms are brief.
+const TRANSITIONS = {
+  clear: [['clear', 0.72], ['cloudy', 0.2], ['rain', 0.07], ['storm', 0.01]],
+  cloudy: [['cloudy', 0.55], ['clear', 0.25], ['rain', 0.18], ['storm', 0.02]],
+  rain: [['rain', 0.55], ['cloudy', 0.25], ['clear', 0.12], ['storm', 0.08]],
+  storm: [['storm', 0.35], ['rain', 0.4], ['cloudy', 0.2], ['clear', 0.05]],
+};
 
-  function sunElevation(hour) {
-    // Sunrise 6:00, noon peak, sunset 19:00.
-    const dayT = (hour - 6) / 13;
-    return Math.sin(clamp(dayT, -0.2, 1.2) * Math.PI);
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function pickNext(rng, from) {
+  const row = TRANSITIONS[from];
+  let r = rng();
+  for (const [name, p] of row) {
+    r -= p;
+    if (r <= 0) return name;
+  }
+  return row[0][0];
+}
+
+/** Sky + fog + sun colours keyed by sun elevation (-1..1). */
+function skyFor(elev) {
+  if (elev > 0.35) return { sky: 0x87b5e0, fog: 0x9ab8d0, sun: 0xfff2d8 };
+  if (elev > 0.05) return { sky: 0xe8a06a, fog: 0xd89a72, sun: 0xffb35a };
+  if (elev > -0.12) return { sky: 0x5a4a6a, fog: 0x4a3f55, sun: 0xff8a4a };
+  return { sky: 0x0e1424, fog: 0x0e1424, sun: 0x8aa8d8 };
+}
+
+export function createWeather(scene) {
+  const rng = mulberry32(777);
+  const sun = new THREE.DirectionalLight(0xfff2d8, 2.4);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -160;
+  sun.shadow.camera.right = 160;
+  sun.shadow.camera.top = 160;
+  sun.shadow.camera.bottom = -160;
+  sun.shadow.camera.far = 600;
+  sun.shadow.bias = -0.0008;
+  sun.shadow.normalBias = 0.6;
+  scene.add(sun);
+  scene.add(sun.target);
+  const hemi = new THREE.HemisphereLight(0xbfd8ff, 0x4a4038, 1.25);
+  scene.add(hemi);
+  scene.fog = new THREE.FogExp2(0x9ab8d0, 0.00045);
+
+  // Rain: one Points cloud, recycled around the player, visible in rain.
+  const RAIN_COUNT = 700;
+  const rainPos = new Float32Array(RAIN_COUNT * 3);
+  for (let i = 0; i < RAIN_COUNT; i++) {
+    rainPos[i * 3] = (rng() - 0.5) * 60;
+    rainPos[i * 3 + 1] = rng() * 30;
+    rainPos[i * 3 + 2] = (rng() - 0.5) * 60;
+  }
+  const rainGeo = new THREE.BufferGeometry();
+  rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPos, 3));
+  const rain = new THREE.Points(rainGeo, new THREE.PointsMaterial({
+    color: 0x9ab8d8, size: 0.35, transparent: true, opacity: 0.55, sizeAttenuation: true,
+  }));
+  rain.visible = false;
+  rain.frustumCulled = false;
+  scene.add(rain);
+
+  const state = {
+    dayTime: 9 / 24, // 09:00 start — morning sun over the Docks
+    weather: 'clear',
+    weatherTimer: 60 + rng() * 60,
+    blend: 1, // 0..1 transition blend toward the current weather
+    lightning: 0,
+    lightningTimer: 4 + rng() * 8,
+    windX: 0.15, // wind the rain streaks lean into; drifts slowly
+    windZ: -0.1,
+  };
+
+  function sunElevation() {
+    // dayTime 0 = midnight, 0.5 = noon. Elevation peaks at noon.
+    return Math.sin((state.dayTime - 0.25) * Math.PI * 2);
   }
 
-  function computeNight() {
-    const elev = sunElevation(hours);
-    return clamp(1 - (elev + 0.08) / 0.35, 0, 1);
+  function nightFactor() {
+    const e = sunElevation();
+    if (e > 0.08) return 0;
+    if (e < -0.12) return 1;
+    return (0.08 - e) / 0.2;
   }
 
-  function rollWeather() {
-    const table = TRANSITIONS[current];
-    const r = Math.random();
-    let acc = 0;
-    let next = current;
-    for (const key of WEATHERS) {
-      acc += table[key];
-      if (r <= acc) { next = key; break; }
-    }
-    if (next !== current) {
-      previous = current;
-      current = next;
-      blend = 0;
-      game.events.emit('weather', { kind: current, previous });
-      game.hud.notify(game.lang(current), 'good');
-    }
+  function hourMinute() {
+    const h = Math.floor(state.dayTime * 24);
+    const m = Math.floor((state.dayTime * 24 - h) * 60);
+    return { h, m };
   }
 
-  function effective(name) {
-    const table = name === 'grip' ? GRIP : VISION;
-    return lerp(table[previous], table[current], blend);
-  }
-
+  /** Forecast: simulate the Markov chain forward, honestly. */
   function forecast() {
-    const random = mulberry32(chainSeed + Math.floor(hours * 4));
     const out = [];
-    let state = current;
-    for (let step = 1; step <= 3; step += 1) {
-      const table = TRANSITIONS[state];
-      const r = random();
-      let acc = 0;
-      for (const key of WEATHERS) {
-        acc += table[key];
-        if (r <= acc) { state = key; break; }
-      }
-      out.push({ hour: (Math.floor(hours) + step) % 24, weather: state });
+    let w = state.weather;
+    const sim = mulberry32(Math.floor(state.dayTime * 100000) + 42);
+    for (let i = 1; i <= 3; i++) {
+      w = pickNext(sim, w);
+      out.push({ hoursAhead: i, weather: w });
     }
     return out;
   }
 
-  function update(dt) {
-    hours = (hours + dt / (DAY_SECONDS / 24)) % 24;
-    blend = Math.min(1, blend + dt / 5);
-    rollTimer -= dt;
-    if (rollTimer <= 0) {
-      rollTimer = 22 + Math.random() * 14;
-      rollWeather();
+  function stepClock(dt) {
+    state.dayTime = (state.dayTime + dt / DAY_LENGTH) % 1;
+    state.blend = Math.min(1, state.blend + dt / 8);
+  }
+
+  function stepWeather(dt) {
+    state.weatherTimer -= dt;
+    if (state.weatherTimer <= 0) {
+      const next = pickNext(rng, state.weather);
+      if (next !== state.weather) {
+        state.weather = next;
+        state.blend = 0;
+      }
+      state.weatherTimer = 45 + rng() * 75;
     }
-    nightFactor += (computeNight() - nightFactor) * Math.min(1, dt * 0.5);
-    const elev = sunElevation(hours);
-    const { sun, hemi, ambient } = game.lights;
-    const azimuth = ((hours - 6) / 13) * Math.PI;
-    const sunX = Math.cos(azimuth) * 160;
-    const sunZ = Math.sin(azimuth) * 90 + 40;
-    const sunY = Math.max(12, elev * 220 + 30);
-    sun.position.set(game.player.x + sunX, sunY, game.player.z + sunZ);
-    const warmth = clamp(1 - Math.abs(elev - 0.35), 0, 1);
-    const dayColor = { r: 1, g: 0.95, b: 0.87 };
-    const duskColor = { r: 1, g: 0.55, b: 0.3 };
-    const nightColor = { r: 0.35, g: 0.45, b: 0.65 };
-    let cr;
-    let cg;
-    let cb;
-    if (nightFactor > 0.5) {
-      const t = (nightFactor - 0.5) * 2;
-      cr = lerp(duskColor.r, nightColor.r, t);
-      cg = lerp(duskColor.g, nightColor.g, t);
-      cb = lerp(duskColor.b, nightColor.b, t);
-    } else {
-      const t = nightFactor * 2;
-      cr = lerp(dayColor.r, duskColor.r, t * warmth);
-      cg = lerp(dayColor.g, duskColor.g, t * warmth);
-      cb = lerp(dayColor.b, duskColor.b, t * warmth);
-    }
-    sun.color.setRGB(cr, cg, cb);
-    sun.intensity = lerp(2.6, 0.35, nightFactor);
-    if (flash > 0) {
-      flash -= dt;
-      sun.intensity += Math.max(0, flash) * 14;
-    }
-    hemi.intensity = lerp(0.9, 0.25, nightFactor);
-    ambient.intensity = lerp(0.15, 0.08, nightFactor);
-    // Sky + fog follow the weather BLEND, not the new state alone, so
-    // a storm rolling in darkens and closes the fog over five seconds
-    // instead of popping in one frame.
-    const sky = game.scene.background;
-    const daySky = [0.74, 0.85, 0.9];
-    const nightSky = [0.03, 0.05, 0.09];
-    const stormSky = [0.32, 0.36, 0.4];
-    const rainBlend = lerp(RAIN_INTENSITY[previous], RAIN_INTENSITY[current], blend);
-    const weatherGray = lerp(SKY_GRAY[previous], SKY_GRAY[current], blend);
-    const mixed = daySky.map((v, i) => lerp(lerp(v, stormSky[i], weatherGray * (1 - nightFactor)), nightSky[i], nightFactor));
-    if (sky && sky.isColor) sky.setRGB(mixed[0], mixed[1], mixed[2]);
-    if (game.scene.fog) {
-      game.scene.fog.color.setRGB(mixed[0], mixed[1], mixed[2]);
-      const near = lerp(300, 60, rainBlend);
-      const far = lerp(1100, 380, rainBlend);
-      game.scene.fog.near += (near - game.scene.fog.near) * Math.min(1, dt);
-      game.scene.fog.far += (far - game.scene.fog.far) * Math.min(1, dt);
-    }
-    // Rain + lightning.
-    game.particles.setRain(rainBlend);
-    game.audio.setRain(rainBlend);
-    if (current === 'storm') {
-      lightningTimer -= dt;
-      if (lightningTimer <= 0) {
-        lightningTimer = 6 + Math.random() * 12;
-        flash = 0.22;
-        setTimeout(() => game.audio.thunder(), 350 + Math.random() * 700);
+    // Wind drifts so the rain never leans the same way twice.
+    state.windX += (rng() - 0.5) * dt * 0.02;
+    state.windZ += (rng() - 0.5) * dt * 0.02;
+    state.windX = Math.max(-0.6, Math.min(0.6, state.windX));
+    state.windZ = Math.max(-0.6, Math.min(0.6, state.windZ));
+  }
+
+  function stepRain(dt, playerPos) {
+    const w = WEATHERS[state.weather];
+    const rainLevel = w.rain;
+    rain.visible = rainLevel > 0;
+    if (rainLevel <= 0) return;
+    const px = playerPos ? playerPos.x : 0;
+    const pz = playerPos ? playerPos.z : 0;
+    const arr = rainGeo.attributes.position.array;
+    const fall = (rainLevel === 2 ? 26 : 16) * dt;
+    for (let i = 0; i < RAIN_COUNT; i++) {
+      arr[i * 3 + 1] -= fall * (0.7 + ((i * 37) % 10) / 25);
+      arr[i * 3] += state.windX * dt * 6;
+      arr[i * 3 + 2] += state.windZ * dt * 6;
+      if (arr[i * 3 + 1] < 0) {
+        arr[i * 3] = px + (rng() - 0.5) * 60;
+        arr[i * 3 + 1] = 22 + rng() * 8;
+        arr[i * 3 + 2] = pz + (rng() - 0.5) * 60;
       }
     }
-    game.city.update(dt, nightFactor, flash > 0);
+    rainGeo.attributes.position.needsUpdate = true;
   }
 
-  function setTime(nextHours) {
-    hours = ((nextHours % 24) + 24) % 24;
-    nightFactor = computeNight();
+  function stepLightning(dt) {
+    if (state.weather === 'storm') {
+      state.lightningTimer -= dt;
+      if (state.lightningTimer <= 0) {
+        state.lightning = 0.12;
+        state.lightningTimer = 3 + rng() * 9;
+      }
+    }
+    if (state.lightning > 0) {
+      state.lightning -= dt;
+      sun.intensity += 3.5;
+      scene.background = new THREE.Color(0x8a9ab8);
+    }
   }
 
-  function setWeather(kind) {
-    if (!WEATHERS.includes(kind)) return;
-    previous = current;
-    current = kind;
-    blend = 0;
-    game.events.emit('weather', { kind: current, previous });
+  function update(dt, playerPos) {
+    stepClock(dt);
+    stepWeather(dt);
+    const w = WEATHERS[state.weather];
+    const elev = sunElevation();
+    const night = nightFactor();
+    const palette = skyFor(elev);
+
+    // Sun position follows the arc; moonlight (dim, blue) at night.
+    const ang = (state.dayTime - 0.25) * Math.PI * 2;
+    const sunDir = new THREE.Vector3(Math.cos(ang), Math.sin(ang), 0.35).normalize();
+    const px = playerPos ? playerPos.x : 0;
+    const pz = playerPos ? playerPos.z : 0;
+    sun.position.set(px + sunDir.x * 220, Math.max(30, sunDir.y * 220), pz + sunDir.z * 220);
+    sun.target.position.set(px, 0, pz);
+    sun.color.setHex(palette.sun);
+    sun.intensity = 0.25 + (1 - night) * 2.3;
+    hemi.intensity = 0.5 + (1 - night) * 0.75;
+
+    scene.background = new THREE.Color(palette.sky);
+    scene.fog.color.setHex(palette.fog);
+    scene.fog.density = w.fog * (0.6 + 0.4 * state.blend) + night * 0.0002;
+
+    stepRain(dt, playerPos);
+    stepLightning(dt);
   }
 
-  function advanceHours(amount) {
-    setTime(hours + amount);
+  /** Force a weather now (missions, menu). Resets the roll timer. */
+  function forceWeather(w) {
+    if (!WEATHERS[w]) return false;
+    if (w !== state.weather) {
+      state.weather = w;
+      state.blend = 0;
+    }
+    state.weatherTimer = 45 + rng() * 75;
+    return true;
   }
 
   return {
-    get hours() { return hours; },
-    get current() { return current; },
-    get nightFactor() { return nightFactor; },
-    get flash() { return flash; },
-    update, setTime, setWeather, advanceHours, forecast,
-    gripMultiplier() { return effective('grip'); },
-    visionMultiplier() { return effective('vision'); },
-    isNight() { return nightFactor > 0.6; },
-    setState(nextHours, kind) {
-      hours = nextHours;
-      current = kind;
-      previous = kind;
-      blend = 1;
-      nightFactor = computeNight();
+    state,
+    update,
+    forecast,
+    hourMinute,
+    nightFactor,
+    sunElevation,
+    forceWeather,
+    setTime(hours) {
+      state.dayTime = ((hours % 24) + 24) % 24 / 24;
+    },
+    get dayTime() { return state.dayTime; },
+    get weather() { return state.weather; },
+    get gripFactor() { return WEATHERS[state.weather].grip; },
+    get sightFactor() { return WEATHERS[state.weather].sight; },
+    get wind() { return { x: state.windX, z: state.windZ }; },
+    weatherLabel(lang) {
+      return WEATHERS[state.weather].label[lang] || WEATHERS[state.weather].label.en;
     },
   };
 }

@@ -1,275 +1,245 @@
-// All input in one place: keyboard, mouse and touch. The loop reads held
-// state every step and takes one-shot presses once, so a press between two
-// frames is never lost and never counted twice. Touch controls are part of
-// this same build: the joystick, action buttons and camera drag feed the
-// same axes the keyboard does.
+// input.js — keyboard + mouse + touch, one state object, rewritten in phase 2.
+//
+// Every control is per-button state (held / just-pressed), so the game
+// never misses a tap and never double-fires one. Aim and fire are
+// independent buttons: on a phone the player can drag-aim with one thumb
+// and hold fire with the other at the same time (F2's twin requirement:
+// aim + fire together, run + steer together). This rewrite keeps the
+// exact phase-1 API, drives the touch buttons from one binding table
+// instead of six copy-pasted calls, and adds edge-triggered horn and
+// lights actions (H / L) that the audio and headlight code listen for.
+//
+// Desktop (SPEC §5.1): WASD move/drive, Shift run, Space handbrake,
+// E enter/exit, F interact, left click fire, right click aim (hold),
+// R reload, 1-5 weapons, M map, Esc/P pause, H horn, L lights.
+// Touch (SPEC §5.2): left virtual joystick (move + steer), right buttons
+// ACTION / FIRE / BRAKE / RUN (hold-to-run, F2), weapon picker, map,
+// pause. Camera drag happens on empty screen space.
 
-export function createInput(game) {
+const KEY_ACTIONS = [
+  ['KeyE', 'enter'],
+  ['KeyR', 'reload'],
+  ['KeyM', 'map'],
+  ['KeyH', 'horn'],
+  ['KeyL', 'lights'],
+];
+
+const TOUCH_HOLD = [
+  ['btnRun', 'run'],
+  ['btnFire', 'fire'],
+  ['btnAim', 'aim'],
+  ['btnBrake', 'brake'],
+];
+
+const TOUCH_TAP = [
+  ['btnAction', 'action'],
+  ['btnInteract', 'interact'],
+];
+
+export function createInput() {
   const keys = new Set();
-  const pressed = new Set();
-  let lookDX = 0;
-  let lookDY = 0;
-  let wheelDelta = 0;
-  let fireHeld = false;
-  let aimHeld = false;
-  let lastTouchAt = 0;
-  let mouseX = 0;
-  let mouseY = 0;
-  let dragging = false;
-  let lastDragX = 0;
-  let lastDragY = 0;
-  const joy = { x: 0, y: 0, active: false };
-  const touchHeld = new Set();
-  let touchSeen = false;
+  const pressed = new Set(); // edge-triggered: consumed by takeActions()
+  const joy = { active: false, id: -1, x: 0, y: 0, mag: 0, lookId: -1, lastX: 0, lastY: 0 };
+  const touch = { run: false, fire: false, aim: false, brake: false, action: false, interact: false };
+  const look = { dx: 0, dy: 0 }; // accumulated mouse/touch-drag look deltas
+  let mouseDown = false;
+  let mouseAim = false;
+  let pointerLocked = false;
+  let lookScale = 1;
 
-  const canvas = game.canvas;
-
-  function isTypingTarget(event) {
-    const tag = event.target && event.target.tagName;
-    return tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
-  }
-
-  function press(action) {
-    pressed.add(action);
-  }
-
-  const KEY_ACTIONS = {
-    KeyE: 'enter', KeyF: 'interact', KeyR: 'reload', KeyP: 'pause', Escape: 'pause',
-    KeyM: 'map', KeyH: 'horn', KeyL: 'lights', KeyQ: 'medkit', Space: 'jump',
-    Enter: 'dialogAdvance', Digit1: 'weapon1', Digit2: 'weapon2', Digit3: 'weapon3',
-    Digit4: 'weapon4', Digit5: 'weapon5',
-  };
-
-  window.addEventListener('keydown', (event) => {
-    if (isTypingTarget(event)) return;
-    keys.add(event.code);
-    if (!event.repeat && KEY_ACTIONS[event.code]) {
-      press(KEY_ACTIONS[event.code]);
-      if (event.code === 'Space' || event.code === 'Enter') event.preventDefault();
+  window.addEventListener('keydown', (e) => {
+    if (e.repeat) return;
+    keys.add(e.code);
+    pressed.add(e.code);
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+      e.preventDefault();
     }
-    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) event.preventDefault();
   });
-  window.addEventListener('keyup', (event) => {
-    keys.delete(event.code);
+  window.addEventListener('keyup', (e) => keys.delete(e.code));
+  window.addEventListener('blur', () => keys.clear());
+
+  const canvas = document.getElementById('game');
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0) mouseDown = true;
+    if (e.button === 2) mouseAim = true;
   });
-  window.addEventListener('blur', () => {
-    keys.clear();
-    fireHeld = false;
-    aimHeld = false;
-    touchHeld.clear();
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 0) mouseDown = false;
+    if (e.button === 2) mouseAim = false;
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('mousemove', (e) => {
+    if (pointerLocked || mouseDown) {
+      look.dx += e.movementX;
+      look.dy += e.movementY;
+    }
+  });
+  canvas.addEventListener('click', () => {
+    // Desktop aim uses pointer lock when the game is running; a click
+    // re-locks after Esc released it. Failure is silent (not an error).
+    if (!pointerLocked && !('ontouchstart' in window)) {
+      canvas.requestPointerLock?.();
+    }
+  });
+  document.addEventListener('pointerlockchange', () => {
+    pointerLocked = document.pointerLockElement === canvas;
   });
 
-  canvas.addEventListener('pointerdown', (event) => {
-    if (event.pointerType === 'touch') return;
-    if (event.button === 0) fireHeld = true;
-    if (event.button === 2) aimHeld = true;
-    dragging = true;
-    lastDragX = event.clientX;
-    lastDragY = event.clientY;
-  });
-  // Mouse buttons, per button: pointerdown fires only for the FIRST
-  // button held, so aiming (right) and then pressing fire (left) never
-  // produced a second pointerdown and the gun never fired while aiming.
-  // mousedown fires for every button press, in either order. Touch
-  // drags fire a compatibility mousedown afterwards; the guard below
-  // (stamped by the touch look handler) swallows those.
-  canvas.addEventListener('mousedown', (event) => {
-    if (performance.now() - lastTouchAt < 500) return;
-    if (event.button === 0) fireHeld = true;
-    if (event.button === 2) aimHeld = true;
-  });
-  window.addEventListener('mouseup', (event) => {
-    if (event.button === 0) fireHeld = false;
-    if (event.button === 2) aimHeld = false;
-  });
-  window.addEventListener('pointerup', (event) => {
-    if (event.button === 0) fireHeld = false;
-    if (event.button === 2) aimHeld = false;
-    dragging = false;
-  });
-  window.addEventListener('pointermove', (event) => {
-    mouseX = event.clientX;
-    mouseY = event.clientY;
-    if (!dragging || event.pointerType === 'touch') return;
-    const sens = game.settings.sensitivity;
-    lookDX += (event.clientX - lastDragX) * 0.0032 * sens;
-    lookDY += (event.clientY - lastDragY) * 0.0028 * sens;
-    lastDragX = event.clientX;
-    lastDragY = event.clientY;
-  });
-  canvas.addEventListener('contextmenu', (event) => event.preventDefault());
-  canvas.addEventListener('wheel', (event) => {
-    if (game.ui.isOverMinimap(event.clientX, event.clientY)) return;
-    wheelDelta += event.deltaY > 0 ? 1 : -1;
-    event.preventDefault();
-  }, { passive: false });
-
-  // ---- Touch: joystick, buttons, camera drag on empty space ----
-  const joyEl = document.getElementById('joy');
-  const knobEl = document.getElementById('joyKnob');
-  let joyPointer = null;
-  function joyMove(clientX, clientY) {
-    const rect = joyEl.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-    let dx = (clientX - cx) / (rect.width / 2);
-    let dy = (clientY - cy) / (rect.height / 2);
-    const len = Math.hypot(dx, dy);
-    if (len > 1) { dx /= len; dy /= len; }
-    joy.x = dx;
-    joy.y = dy;
-    knobEl.style.transform = `translate(${dx * 30}px, ${dy * 30}px)`;
-  }
-  joyEl.addEventListener('pointerdown', (event) => {
-    touchSeen = true;
-    joyPointer = event.pointerId;
-    joy.active = true;
-    joyEl.setPointerCapture(event.pointerId);
-    joyMove(event.clientX, event.clientY);
-    event.preventDefault();
-  });
-  joyEl.addEventListener('pointermove', (event) => {
-    if (event.pointerId === joyPointer) joyMove(event.clientX, event.clientY);
-  });
-  function joyEnd(event) {
-    if (event.pointerId !== joyPointer) return;
-    joyPointer = null;
-    joy.active = false;
-    joy.x = 0;
-    joy.y = 0;
-    knobEl.style.transform = 'translate(0px, 0px)';
-  }
-  joyEl.addEventListener('pointerup', joyEnd);
-  joyEl.addEventListener('pointercancel', joyEnd);
-
-  function bindTouchButton(id, down, up) {
+  // ---- Touch buttons, driven by the tables above ----
+  function bindHold(id, name) {
     const el = document.getElementById(id);
     if (!el) return;
-    el.addEventListener('pointerdown', (event) => {
-      touchSeen = true;
-      el.classList.add('held');
-      down();
-      event.preventDefault();
-    });
-    const release = () => {
-      el.classList.remove('held');
-      if (up) up();
-    };
-    el.addEventListener('pointerup', release);
-    el.addEventListener('pointercancel', release);
-    el.addEventListener('pointerleave', release);
+    const on = (e) => { e.preventDefault(); touch[name] = true; el.classList.add('held'); };
+    const off = (e) => { e.preventDefault(); touch[name] = false; el.classList.remove('held'); };
+    el.addEventListener('touchstart', on, { passive: false });
+    el.addEventListener('touchend', off);
+    el.addEventListener('touchcancel', off);
+    el.addEventListener('mousedown', on);
+    el.addEventListener('mouseup', off);
+    el.addEventListener('mouseleave', off);
   }
-  bindTouchButton('btnFire', () => { fireHeld = true; }, () => { fireHeld = false; });
-  bindTouchButton('btnAction', () => press('enter'));
-  bindTouchButton('btnInteract', () => press('interact'));
-  bindTouchButton('btnBrake', () => { touchHeld.add('handbrake'); }, () => { touchHeld.delete('handbrake'); });
-  bindTouchButton('btnRun', () => { touchHeld.add('sprint'); }, () => { touchHeld.delete('sprint'); });
-  bindTouchButton('btnMapT', () => press('map'));
-  bindTouchButton('btnPauseT', () => press('pause'));
+  function bindTap(id, name) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('touchstart', (e) => { e.preventDefault(); touch[name] = true; }, { passive: false });
+    el.addEventListener('click', () => { touch[name] = true; });
+  }
+  for (const [id, name] of TOUCH_HOLD) bindHold(id, name);
+  for (const [id, name] of TOUCH_TAP) bindTap(id, name);
 
-  // Camera drag: a touch that starts on the canvas (not on a control)
-  // orbits the camera, like dragging with the mouse.
-  let camPointer = null;
-  let camLastX = 0;
-  let camLastY = 0;
-  canvas.addEventListener('pointerdown', (event) => {
-    if (event.pointerType !== 'touch') return;
-    touchSeen = true;
-    lastTouchAt = performance.now();
-    camPointer = event.pointerId;
-    camLastX = event.clientX;
-    camLastY = event.clientY;
-  });
-  canvas.addEventListener('pointermove', (event) => {
-    if (event.pointerType !== 'touch' || event.pointerId !== camPointer) return;
-    const sens = game.settings.sensitivity;
-    lookDX += (event.clientX - camLastX) * 0.005 * sens;
-    lookDY += (event.clientY - camLastY) * 0.004 * sens;
-    camLastX = event.clientX;
-    camLastY = event.clientY;
-  });
-  function camEnd(event) {
-    if (event.pointerId === camPointer) camPointer = null;
+  // ---- Virtual joystick + camera drag ----
+  const joyBase = document.getElementById('joy');
+  const joyKnob = document.getElementById('joyKnob');
+
+  function joyPos(t) {
+    const r = joyBase.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    let dx = (t.clientX - cx) / (r.width / 2);
+    let dy = (t.clientY - cy) / (r.height / 2);
+    const m = Math.hypot(dx, dy);
+    if (m > 1) { dx /= m; dy /= m; }
+    return { dx, dy, mag: Math.min(1, m) };
   }
-  canvas.addEventListener('pointerup', camEnd);
-  canvas.addEventListener('pointercancel', camEnd);
+  function onTouchStart(e) {
+    for (const t of e.changedTouches) {
+      const el = document.elementFromPoint(t.clientX, t.clientY);
+      if (joyBase && joyBase.contains(el)) {
+        joy.active = true;
+        joy.id = t.identifier;
+        const p = joyPos(t);
+        joy.x = p.dx; joy.y = p.dy; joy.mag = p.mag;
+        joyKnob.style.transform = `translate(${p.dx * 34}px, ${p.dy * 34}px)`;
+      } else if (el === canvas) {
+        // Drag on empty space looks the camera around.
+        joy.lookId = t.identifier;
+        joy.lastX = t.clientX;
+        joy.lastY = t.clientY;
+      }
+    }
+  }
+  function onTouchMove(e) {
+    for (const t of e.changedTouches) {
+      if (joy.active && t.identifier === joy.id) {
+        const p = joyPos(t);
+        joy.x = p.dx; joy.y = p.dy; joy.mag = p.mag;
+        joyKnob.style.transform = `translate(${p.dx * 34}px, ${p.dy * 34}px)`;
+        e.preventDefault();
+      } else if (t.identifier === joy.lookId) {
+        look.dx += (t.clientX - joy.lastX) * 2.2 * lookScale;
+        look.dy += (t.clientY - joy.lastY) * 2.2 * lookScale;
+        joy.lastX = t.clientX;
+        joy.lastY = t.clientY;
+        e.preventDefault();
+      }
+    }
+  }
+  function onTouchEnd(e) {
+    for (const t of e.changedTouches) {
+      if (t.identifier === joy.id) {
+        joy.active = false; joy.id = -1; joy.x = 0; joy.y = 0; joy.mag = 0;
+        joyKnob.style.transform = 'translate(0px, 0px)';
+      }
+      if (t.identifier === joy.lookId) joy.lookId = -1;
+    }
+  }
+  document.addEventListener('touchstart', onTouchStart, { passive: true });
+  document.addEventListener('touchmove', onTouchMove, { passive: false });
+  document.addEventListener('touchend', onTouchEnd);
+  document.addEventListener('touchcancel', onTouchEnd);
+
+  // ---- Per-frame state ----
+  function moveVector() {
+    let x = 0;
+    let y = 0;
+    if (keys.has('KeyW') || keys.has('ArrowUp')) y += 1;
+    if (keys.has('KeyS') || keys.has('ArrowDown')) y -= 1;
+    if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
+    if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
+    if (joy.active) {
+      x += joy.x;
+      y -= joy.y; // joystick up = forward
+    }
+    const m = Math.hypot(x, y);
+    if (m > 1) { x /= m; y /= m; }
+    return { x, y };
+  }
+
+  function driveControls() {
+    // Driving shares the same axes: joystick / WASD steer + throttle.
+    const mv = moveVector();
+    return {
+      throttle: mv.y,
+      steer: mv.x,
+      handbrake: keys.has('Space') || touch.brake,
+      horn: keys.has('KeyH'),
+      lights: keys.has('KeyL'),
+    };
+  }
+
+  /** Edge-triggered actions, consumed once per call. */
+  function takeActions() {
+    const out = new Set();
+    const take = (code) => {
+      if (pressed.has(code)) { pressed.delete(code); return true; }
+      return false;
+    };
+    for (const [code, name] of KEY_ACTIONS) {
+      if (take(code)) out.add(name);
+    }
+    if (take('KeyF') || touch.interact) { out.add('interact'); touch.interact = false; }
+    if (take('Escape') || take('KeyP')) out.add('pause');
+    if (touch.action) { out.add('enter'); touch.action = false; }
+    for (let i = 1; i <= 5; i++) {
+      if (take(`Digit${i}`)) out.add(`weapon${i}`);
+    }
+    pressed.clear();
+    return out;
+  }
 
   return {
-    /** Move axes: x = strafe right, y = forward. Keyboard + joystick merged. */
-    axis() {
-      let x = 0;
-      let y = 0;
-      if (keys.has('KeyA') || keys.has('ArrowLeft')) x -= 1;
-      if (keys.has('KeyD') || keys.has('ArrowRight')) x += 1;
-      if (keys.has('KeyW') || keys.has('ArrowUp')) y += 1;
-      if (keys.has('KeyS') || keys.has('ArrowDown')) y -= 1;
-      if (joy.active) {
-        x += joy.x;
-        y += -joy.y;
-      }
-      const len = Math.hypot(x, y);
-      if (len > 1) { x /= len; y /= len; }
-      return { x, y };
+    keys,
+    get moveX() { return moveVector().x; },
+    get moveY() { return moveVector().y; },
+    get sprint() {
+      return keys.has('ShiftLeft') || keys.has('ShiftRight') || touch.run;
     },
-    throttle() {
-      let t = 0;
-      if (keys.has('KeyW') || keys.has('ArrowUp')) t += 1;
-      if (keys.has('KeyS') || keys.has('ArrowDown')) t -= 1;
-      if (joy.active) {
-        const forward = -joy.y;
-        // Full-throttle detent: pushing the stick 75%+ forward counts
-        // as full throttle, so touch drivers can actually reach a
-        // car's top speed instead of hovering at partial throttle.
-        t += forward >= 0.75 ? 1 : forward;
-      }
-      return Math.max(-1, Math.min(1, t));
-    },
-    steer() {
-      let s = 0;
-      if (keys.has('KeyA') || keys.has('ArrowLeft')) s -= 1;
-      if (keys.has('KeyD') || keys.has('ArrowRight')) s += 1;
-      if (joy.active) s += joy.x;
-      return Math.max(-1, Math.min(1, s));
-    },
-    sprint() {
-      return keys.has('ShiftLeft') || keys.has('ShiftRight') || touchHeld.has('sprint');
-    },
-    handbrake() {
-      return keys.has('Space') || touchHeld.has('handbrake');
-    },
-    fireHeld() { return fireHeld; },
-    aimHeld() { return aimHeld; },
-    mouse() { return { x: mouseX, y: mouseY }; },
-    takeLookDelta() {
-      const d = { dx: lookDX, dy: lookDY };
-      lookDX = 0;
-      lookDY = 0;
+    get fire() { return mouseDown || touch.fire; },
+    get aim() { return mouseAim || touch.aim; },
+    get handbrake() { return keys.has('Space') || touch.brake; },
+    get horn() { return keys.has('KeyH'); },
+    driveControls,
+    takeActions,
+    /** Consume accumulated look deltas (mouse / touch drag). */
+    takeLook() {
+      const d = { dx: look.dx, dy: look.dy };
+      look.dx = 0;
+      look.dy = 0;
       return d;
     },
-    takeWheel() {
-      const w = wheelDelta;
-      wheelDelta = 0;
-      return w;
-    },
-    takePressed() {
-      const taken = new Set(pressed);
-      pressed.clear();
-      return taken;
-    },
-    peekPressed(action) {
-      return pressed.has(action);
-    },
-    clearPressed() {
-      pressed.clear();
-    },
-    touchSeen() { return touchSeen; },
-    resetTransient() {
-      fireHeld = false;
-      aimHeld = false;
-      lookDX = 0;
-      lookDY = 0;
-      wheelDelta = 0;
-      pressed.clear();
+    setLookScale(v) { lookScale = Math.max(0.3, Math.min(2.5, v)); },
+    isTouch() {
+      return 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     },
   };
 }

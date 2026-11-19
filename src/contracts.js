@@ -1,340 +1,330 @@
-// Procedural work: the contract board at the bar offers three jobs
-// generated from the city itself, and the world pays for caches, stunt
-// jumps and time trials. Rewards follow distance and risk, and the
-// player's contract reputation moves them up or down — failure costs
-// real standing, so the next board pays less.
+// contracts.js — side work: procedural contracts and world activities.
+//
+// Four contract types (SPEC §3.1), generated without limit: Delivery,
+// Getaway, Repo, Vigilante. A contract board lives at the bar — walk up
+// and press F, or take the nearest offer from the pause menu. Payouts
+// follow distance + risk, and failing a contract costs reputation, which
+// shrinks the next payout — the economy has consequences. The same
+// module owns the three world activities: 24 Ember Caches ($100 each,
+// $1,000 bonus for the set), 5 Stunt Jumps (air time + distance), and 3
+// Time Trials (local best times). All of it is saved.
 
-import { ACTIVITY_REWARDS, CONTRACT_CLIENTS, CONTRACT_TYPES, REPO_SUPERCAR_BONUS, REPO_VEHICLE_TYPES, REPUTATION, reputationMultiplier } from '../data/contractsData.js';
-import { CACHES, POIS, STUNT_JUMPS, TIME_TRIALS, poiById } from '../data/cityData.js';
-import { dist2, mulberry32, pick } from './utils.js';
-import { animateWalker, buildWalkerMesh } from './pedestrians.js';
+import { LANDMARKS } from './city.js';
 
-export function createContracts(game) {
-  let active = null;
-  let beacon = null;
-  let client = null;
-  let targetVehicle = null;
-  let trial = null;
-  let suppressHeat = false;
-  let offeredCache = null;
-  let offeredSeed = -1;
+const CONTRACT_SPOTS = [
+  { x: 30, z: -180, name: 'bar' },
+  { x: -460, z: -380, name: 'safehouse' },
+  { x: 150, z: 300, name: 'market' },
+  { x: 420, z: -420, name: 'marina' },
+];
 
-  function lang() { return game.settings.language; }
-  function text(pair) { return pair[lang()] || pair.en; }
+const CACHE_SPOTS = [
+  [-560, -520], [-480, -300], [-380, -540], [-300, -420], [-520, 100], [-420, 300],
+  [-300, 60], [-180, -420], [-60, -300], [60, -420], [180, -300], [300, -480],
+  [480, -300], [540, -120], [420, 60], [300, 240], [120, 420], [-60, 480],
+  [-240, 420], [-420, 480], [60, 120], [-120, 60], [240, -60], [480, 420],
+];
 
-  function clearBeacon() {
-    if (beacon) {
-      game.scene.remove(beacon);
-      beacon = null;
+const STUNT_JUMPS = [
+  { x: 0, z: 545, dir: 0, name: { id: 'Lompatan Pantai', en: 'Beach Jump' } },
+  { x: -300, z: 0, dir: Math.PI / 2, name: { id: 'Lompatan Terowongan', en: 'Tunnel Jump' } },
+  { x: 150, z: -450, dir: 0, name: { id: 'Lompatan Marina', en: 'Marina Jump' } },
+  { x: 450, z: 300, dir: -Math.PI / 2, name: { id: 'Lompatan Mercusuar', en: 'Lighthouse Jump' } },
+  { x: -450, z: -150, dir: Math.PI, name: { id: 'Lompatan Dok', en: 'Docks Jump' } },
+];
+
+const TIME_TRIALS = [
+  { id: 'tt1', name: { id: 'Putaran Neon', en: 'Neon Loop' }, points: [[-150, -150], [150, -150], [150, 150], [-150, 150]] },
+  { id: 'tt2', name: { id: 'Pesisir Ember', en: 'Ember Coast' }, points: [[-450, 545], [0, 545], [450, 545], [480, 300]] },
+  { id: 'tt3', name: { id: 'Ring Kota', en: 'City Ring' }, points: [[-450, -450], [450, -450], [450, 450], [-450, 450]] },
+];
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function createContracts(deps) {
+  const { player, vehicles, city, economy, bus, wanted } = deps;
+  const rng = mulberry32(31337);
+  const lang = () => (deps.getLang ? deps.getLang() : 'id');
+  const notify = (msg) => { if (deps.notify) deps.notify(msg); };
+
+  const state = {
+    reputation: 0, // -100..100; failed contracts lower it, payouts scale with it
+    active: null, // {id, type, ...}
+    offers: [],
+    done: 0,
+    failed: 0,
+    cachesFound: [],
+    stuntBest: {},
+    trialBest: {},
+    contractSeq: 0,
+  };
+
+  // ---------- Contract generation ----------
+  function randomDest(fromX, fromZ, minDist = 250) {
+    for (let tries = 0; tries < 20; tries++) {
+      const p = city.randomRoadPoint(rng);
+      if (Math.hypot(p.x - fromX, p.z - fromZ) >= minDist) return p;
     }
+    return { x: -fromX, z: -fromZ };
   }
 
-  function setBeacon(x, z, color = 0x7fd4ff) {
-    clearBeacon();
-    beacon = game.city.createBeacon(x, z, color);
-    game.scene.add(beacon);
-    game.minimap.setTarget(x, z);
+  function payoutFor(dist, risk) {
+    const base = 150 + Math.round(dist / 4) + risk * 60;
+    const repMul = 1 + state.reputation / 200;
+    return Math.max(80, Math.round((base * repMul) / 10) * 10);
   }
 
-  function randomPoint(random, nearX, nearZ, minDist, maxDist) {
-    for (let attempt = 0; attempt < 24; attempt += 1) {
-      const node = game.roadgraph.randomNode(random, nearX, nearZ, minDist, maxDist);
-      if (node) return { x: node.x, z: node.z };
+  function generateOffer() {
+    const types = ['delivery', 'getaway', 'repo', 'vigilante'];
+    const type = types[Math.floor(rng() * types.length)];
+    const p = player.position();
+    const dest = randomDest(p.x, p.z);
+    const dist = Math.hypot(dest.x - p.x, dest.z - p.z);
+    const risk = type === 'vigilante' ? 3 : type === 'getaway' ? 2 : type === 'repo' ? 2 : 1;
+    const c = {
+      id: `c${++state.contractSeq}`,
+      type,
+      dest,
+      dist: Math.round(dist),
+      payout: payoutFor(dist, risk),
+      timeLeft: type === 'delivery' ? 150 + dist / 6 : type === 'getaway' ? 120 : 0,
+      target: null,
+    };
+    if (type === 'repo') {
+      const kinds = ['swift', 'bulldog', 'seraph', 'komodo'];
+      c.targetType = kinds[Math.floor(rng() * kinds.length)];
     }
-    const poi = pick(random, POIS);
-    return { x: poi.x, z: poi.z };
+    if (type === 'vigilante') {
+      c.targetPos = randomDest(p.x, p.z, 150);
+    }
+    return c;
   }
 
-  function offered() {
-    const seed = game.progress.contractSeed * 7919 + game.progress.contractsCompleted * 104729;
-    if (offeredCache && offeredSeed === seed) return offeredCache;
-    const random = mulberry32(seed);
-    const types = [...CONTRACT_TYPES];
-    for (let i = types.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(random() * (i + 1));
-      [types[i], types[j]] = [types[j], types[i]];
-    }
-    offeredSeed = seed;
-    offeredCache = types.slice(0, 3).map((type, index) => {
-      const pickup = randomPoint(random, game.player.x, game.player.z, 120, 500);
-      const drop = randomPoint(random, pickup.x, pickup.z, 180, 620);
-      const distance = dist2(pickup.x, pickup.z, drop.x, drop.z);
-      const baseReward = Math.round((type.base + distance * type.perMetre) * type.risk);
-      return {
-        index,
-        type: type.id,
-        name: type.name,
-        desc: type.desc,
-        client: pick(random, CONTRACT_CLIENTS),
-        pickup, drop, distance: Math.round(distance),
-        reward: Math.round(baseReward * reputationMultiplier(game.progress.contractRep)),
-        timeLimit: type.timePerMetre > 0 ? Math.round(distance * type.timePerMetre) + 45 : 0,
-        startHeat: type.startHeat || 0,
-      };
-    });
-    return offeredCache;
+  function refreshOffers() {
+    while (state.offers.length < 3) state.offers.push(generateOffer());
   }
 
-  function accept(index) {
-    const offer = offered()[index];
-    if (!offer || active || game.missions.active) return false;
-    active = { ...offer, stage: 'pickup', timer: offer.timeLimit, tag: 'contract-job' };
-    game.audio.setMusicMode('mission');
-    if (offer.type === 'vigilante') {
-      suppressHeat = true;
-      game.gangs.spawnSquad('rogue', offer.pickup.x, offer.pickup.z, 3, { tag: active.tag, hostile: true });
-      active.stage = 'eliminate';
-      setBeacon(offer.pickup.x, offer.pickup.z, 0xff5a4a);
-      game.hud.setObjective(text(CONTRACT_TYPES.find((t) => t.id === 'vigilante').name), offer.pickup.x, offer.pickup.z);
-    } else if (offer.type === 'repo') {
-      const defId = REPO_VEHICLE_TYPES[Math.floor(Math.random() * REPO_VEHICLE_TYPES.length)];
-      targetVehicle = game.vehicles.spawn(defId, offer.pickup.x, offer.pickup.z, 0, { mission: true });
-      if (targetVehicle && targetVehicle.def.cls === 'supercar') {
-        active.reward = Math.round(active.reward * REPO_SUPERCAR_BONUS);
-      }
-      const yard = poiById('chopshop');
-      active.drop = { x: yard.x, z: yard.z };
-      setBeacon(offer.pickup.x, offer.pickup.z);
-      game.hud.setObjective(text(CONTRACT_TYPES.find((t) => t.id === 'repo').name), offer.pickup.x, offer.pickup.z);
-    } else if (offer.type === 'getaway') {
-      const parts = buildWalkerMesh(0x8a6a3a, 0xd9a77c, 0x1c1c1c, 0x222222);
-      parts.group.position.set(offer.pickup.x, 0, offer.pickup.z);
-      game.scene.add(parts.group);
-      client = { x: offer.pickup.x, z: offer.pickup.z, parts, walkPhase: 0 };
-      setBeacon(offer.pickup.x, offer.pickup.z);
-      game.hud.setObjective(text(CONTRACT_TYPES.find((t) => t.id === 'getaway').name), offer.pickup.x, offer.pickup.z);
-    } else {
-      setBeacon(offer.pickup.x, offer.pickup.z);
-      game.hud.setObjective(text(CONTRACT_TYPES.find((t) => t.id === 'delivery').name), offer.pickup.x, offer.pickup.z);
+  function accept(id) {
+    const i = state.offers.findIndex((o) => o.id === id);
+    if (i < 0 || state.active) return false;
+    const c = state.offers.splice(i, 1)[0];
+    state.active = { ...c, startedAt: 0 };
+    if (c.type === 'getaway') wanted.setStars(Math.max(wanted.stars, 2));
+    if (c.type === 'repo') {
+      const v = vehicles.makeVehicle(c.targetType, c.dest.x, c.dest.z, rng() * 6, { parked: true });
+      c.targetVehicle = v;
     }
-    game.hud.notify(`${text(offer.name)} · ${text(offer.client)}`, 'info');
+    if (c.type === 'vigilante') {
+      const list = deps.pedestrians ? deps.pedestrians.spawnGang('foundry', c.targetPos.x, c.targetPos.z, 2, { hostile: true }) : [];
+      c.targets = list;
+    }
+    bus.emit('contract-accepted', { contract: c });
+    notify('contractAccepted');
+    refreshOffers();
     return true;
-  }
-
-  function cleanup() {
-    clearBeacon();
-    game.minimap.setTarget(null, null);
-    game.hud.clearObjective();
-    game.hud.setTimer(null);
-    game.hud.setCounter(null);
-    if (client) {
-      game.scene.remove(client.parts.group);
-      client = null;
-    }
-    suppressHeat = false;
-    game.audio.setMusicMode('explore');
-  }
-
-  function failActive(reason) {
-    if (!active) return;
-    game.progress.contractRep = Math.max(REPUTATION.min, game.progress.contractRep - REPUTATION.failLoss);
-    game.gangs.removeTag(active.tag);
-    cleanup();
-    active = null;
-    targetVehicle = null;
-    game.hud.notify(game.lang(reason === 'timeOut' ? 'contractFailedTime' : 'contractFailed'), 'bad');
   }
 
   function completeActive() {
-    let reward = active.reward;
-    if (active.type === 'repo' && targetVehicle) {
-      reward = Math.round(reward * (0.4 + 0.6 * (targetVehicle.integrity / 100)));
-    }
-    game.progress.contractRep = Math.min(REPUTATION.max, game.progress.contractRep + REPUTATION.successGain);
-    game.progress.contractsCompleted += 1;
-    game.progress.stats.contractsCompleted += 1;
-    game.economy.earn(reward, text(active.name));
-    game.gangs.removeTag(active.tag);
-    cleanup();
-    active = null;
-    targetVehicle = null;
-    offeredCache = null;
-    game.save.autosave('contract');
+    const c = state.active;
+    if (!c) return;
+    economy.earn(c.payout, `Kontrak selesai: ${c.type}`);
+    state.done += 1;
+    state.reputation = Math.min(100, state.reputation + 4);
+    bus.emit('contract-complete', { contract: c, payout: c.payout });
+    notify('contractComplete');
+    state.active = null;
   }
 
-  function updateActive(dt) {
-    const at = (x, z, radius) => dist2(game.player.x, game.player.z, x, z) < radius;
-    if (active.timer > 0) {
-      active.timer -= dt;
-      game.hud.setTimer(active.timer);
-      if (active.timer <= 0) {
-        failActive('timeOut');
-        return;
-      }
-    }
-    if (active.type === 'delivery') {
-      if (active.stage === 'pickup' && at(active.pickup.x, active.pickup.z, 10)) {
-        active.stage = 'deliver';
-        setBeacon(active.drop.x, active.drop.z);
-        game.hud.setObjective(text(active.name), active.drop.x, active.drop.z);
-        game.hud.notify(game.lang('cargoCollected'), 'good');
-      } else if (active.stage === 'deliver' && at(active.drop.x, active.drop.z, 12)) {
-        completeActive();
-      }
-    } else if (active.type === 'getaway') {
-      if (active.stage === 'pickup' && at(active.pickup.x, active.pickup.z, 10)) {
-        active.stage = 'escape';
-        if (client) {
-          game.scene.remove(client.parts.group);
-          client = null;
+  function failActive(reason) {
+    const c = state.active;
+    if (!c) return;
+    state.failed += 1;
+    state.reputation = Math.max(-100, state.reputation - 8);
+    bus.emit('contract-failed', { contract: c, reason });
+    notify('contractFailed');
+    if (c.targetVehicle && !c.targetVehicle.wrecked) vehicles.removeVehicle(c.targetVehicle);
+    state.active = null;
+  }
+
+  bus.on('ped-down', ({ ped }) => {
+    const c = state.active;
+    if (!c || c.type !== 'vigilante' || !c.targets) return;
+    if (c.targets.includes(ped) && c.targets.every((t) => !t.alive)) completeActive();
+  });
+
+  // ---------- World activities ----------
+  let cacheMeshes = [];
+  /** Build the visible gold cache boxes (called once, from main.js). */
+  function buildCaches(THREE, scene) {
+    const geo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xe8b23c, emissive: 0xa87810, emissiveIntensity: 0.9,
+      metalness: 0.7, roughness: 0.3,
+    });
+    cacheMeshes = CACHE_SPOTS.map(([x, z]) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, 0.9, z);
+      m.rotation.y = Math.PI / 4;
+      scene.add(m);
+      return m;
+    });
+  }
+
+  function checkCaches() {
+    const p = player.position();
+    for (let i = 0; i < CACHE_SPOTS.length; i++) {
+      if (state.cachesFound.includes(i)) continue;
+      const [x, z] = CACHE_SPOTS[i];
+      if (Math.hypot(p.x - x, p.z - z) < 4) {
+        state.cachesFound.push(i);
+        if (cacheMeshes[i]) cacheMeshes[i].visible = false;
+        economy.earn(100, 'Ember Cache');
+        notify('cacheFound');
+        bus.emit('cache-found', { index: i, total: state.cachesFound.length });
+        if (state.cachesFound.length === CACHE_SPOTS.length) {
+          economy.earn(1000, 'Ember Cache bonus (lengkap)');
+          notify('cacheBonus');
         }
-        game.wanted.addHeat(active.startHeat, game.player.x, game.player.z, { kind: 'getaway', forced: true });
-        setBeacon(active.drop.x, active.drop.z);
-        game.hud.setObjective(text(active.name), active.drop.x, active.drop.z);
-        game.hud.notify(game.lang('heatRising'), 'bad');
-      } else if (active.stage === 'escape' && at(active.drop.x, active.drop.z, 14)) {
-        if (game.wanted.stars === 0) completeActive();
-        else if (!active.warned) {
-          active.warned = true;
-          game.hud.notify(game.lang('losePoliceFirst'), 'bad');
-        }
-      }
-    } else if (active.type === 'repo') {
-      if (active.stage === 'pickup') {
-        if (targetVehicle && targetVehicle.wrecked) {
-          failActive('vehicleDestroyed');
-          return;
-        }
-        if (targetVehicle && game.player.vehicle === targetVehicle) {
-          active.stage = 'deliver';
-          setBeacon(active.drop.x, active.drop.z);
-          game.hud.setObjective(text(active.name), active.drop.x, active.drop.z);
-        } else if (targetVehicle) {
-          if (beacon) beacon.position.set(targetVehicle.x, 0, targetVehicle.z);
-          game.minimap.setTarget(targetVehicle.x, targetVehicle.z);
-        }
-      } else if (active.stage === 'deliver' && game.player.vehicle === targetVehicle && at(active.drop.x, active.drop.z, 14)) {
-        completeActive();
-      }
-    } else if (active.type === 'vigilante') {
-      const left = game.gangs.aliveWithTag(active.tag);
-      game.hud.setCounter(left);
-      if (left === 0) {
-        game.hud.setCounter(null);
-        completeActive();
       }
     }
   }
 
-  function updateCaches() {
-    for (const cache of CACHES) {
-      if (game.progress.cachesTaken.has(cache.id)) continue;
-      if (dist2(game.player.x, game.player.z, cache.x, cache.z) < 4) {
-        game.progress.cachesTaken.add(cache.id);
-        game.economy.earn(ACTIVITY_REWARDS.cache, game.lang('cacheFound'));
-        game.particles.heal(cache.x, 1.2, cache.z);
-        if (game.progress.cachesTaken.size === CACHES.length) {
-          game.economy.earn(ACTIVITY_REWARDS.cacheBonus, game.lang('cacheBonus'));
-          game.hud.centerMessage(game.lang('allCaches'), 4);
+  let airTime = 0;
+  let lastY = 0;
+  let stuntArmed = false;
+  let stuntJump = null;
+  function checkStunts(dt) {
+    const ps = player.state;
+    const v = ps.inVehicle ? ps.vehicle : null;
+    if (!v) { airTime = 0; stuntArmed = false; return; }
+    // A stunt jump starts when the car leaves the ground fast near a jump.
+    const p = player.position();
+    if (!stuntArmed) {
+      for (const j of STUNT_JUMPS) {
+        if (Math.hypot(p.x - j.x, p.z - j.z) < 12 && Math.abs(v.speed) > 18) {
+          stuntArmed = true;
+          stuntJump = j;
+          airTime = 0;
+          break;
         }
-        break;
       }
     }
-  }
-
-  function recordStunt(airTime, airDist, x, z) {
-    let best = null;
-    let bestDist = 90;
-    for (const jump of STUNT_JUMPS) {
-      const d = dist2(x, z, jump.x, jump.z);
-      if (d < bestDist) {
-        bestDist = d;
-        best = jump;
+    // Airborne is approximated by speed + no wall contact: the arcade
+    // model has no vertical axis, so air time is measured as the time
+    // the car spends above 24 m/s after the lip without slowing.
+    if (stuntArmed) {
+      airTime += dt;
+      if (Math.abs(v.speed) < 12 || airTime > 6) {
+        const score = Math.round(airTime * 100 + Math.abs(v.speed) * 2);
+        const key = stuntJump.name.en;
+        if (score > (state.stuntBest[key] || 0)) {
+          state.stuntBest[key] = score;
+          economy.earn(50 + Math.min(250, score), `Stunt Jump: ${key}`);
+          notify('stuntScore');
+          bus.emit('stunt', { jump: key, score });
+        }
+        stuntArmed = false;
+        airTime = 0;
       }
     }
-    if (!best) return;
-    const score = Math.min(ACTIVITY_REWARDS.stuntCap, Math.round(ACTIVITY_REWARDS.stuntBase + airDist * ACTIVITY_REWARDS.stuntPerMetre + airTime * ACTIVITY_REWARDS.stuntPerSecond));
-    const previous = game.progress.stunts[best.id];
-    const isBest = !previous || score > previous.score;
-    game.progress.stunts[best.id] = {
-      score: Math.max(score, previous?.score || 0),
-      dist: Math.max(airDist, previous?.dist || 0),
-      time: Math.max(airTime, previous?.time || 0),
-    };
-    const reward = isBest ? score : ACTIVITY_REWARDS.stuntBase;
-    game.economy.earn(reward, `${game.lang('stuntJump')} · ${Math.round(airDist)}m · ${airTime.toFixed(1)}s`);
-    game.hud.centerMessage(`${game.lang('stuntJump')}! ${Math.round(airDist)}m`, 2.5);
+    void lastY;
   }
 
-  function trialNear() {
-    for (const trialDef of TIME_TRIALS) {
-      if (dist2(game.player.x, game.player.z, trialDef.start[0], trialDef.start[1]) < 12) return trialDef;
-    }
-    return null;
-  }
-
-  function startTrial(trialDef) {
-    if (trial || active || game.missions.active) return false;
-    trial = { def: trialDef, gateIndex: 0, startTime: game.time };
-    const first = trialDef.checkpoints[0];
-    setBeacon(first[0], first[1], 0x9be07a);
-    game.hud.setObjective(trialDef.name[lang()] || trialDef.name.en, first[0], first[1]);
-    game.hud.notify(game.lang('trialStarted'), 'info');
+  let trial = null;
+  function startTrial(id) {
+    const t = TIME_TRIALS.find((x) => x.id === id);
+    if (!t || trial) return false;
+    trial = { def: t, idx: 0, time: 0 };
     return true;
   }
-
-  function updateTrial(dt) {
+  function checkTrials(dt) {
     if (!trial) return;
-    const gate = trial.def.checkpoints[trial.gateIndex];
-    if (gate && dist2(game.player.x, game.player.z, gate[0], gate[1]) < 14) {
-      trial.gateIndex += 1;
-      game.audio.playSfx('cash', game.player.x, game.player.z);
-      if (trial.gateIndex >= trial.def.checkpoints.length) {
-        const elapsed = game.time - trial.startTime;
-        const previous = game.progress.trials[trial.def.id];
-        const isBest = !previous || elapsed < previous;
-        if (isBest) {
-          game.progress.trials[trial.def.id] = elapsed;
-          game.economy.earn(previous ? ACTIVITY_REWARDS.trialBeat : ACTIVITY_REWARDS.trialFirst, trial.def.name[lang()] || trial.def.name.en);
+    trial.time += dt;
+    const p = player.position();
+    const target = trial.def.points[trial.idx];
+    if (Math.hypot(p.x - target[0], p.z - target[1]) < 12) {
+      trial.idx += 1;
+      if (trial.idx >= trial.def.points.length) {
+        const t = trial.time;
+        const key = trial.def.id;
+        if (!state.trialBest[key] || t < state.trialBest[key]) {
+          state.trialBest[key] = Math.round(t * 10) / 10;
+          economy.earn(150, `Time Trial: ${trial.def.name.en} — ${t.toFixed(1)}s`);
+          notify('trialBest');
         }
-        game.hud.centerMessage(`${trial.def.name[lang()] || trial.def.name.en} · ${elapsed.toFixed(1)}s${isBest ? ` · ${game.lang('newBest')}` : ''}`, 3);
+        bus.emit('trial-done', { trial: key, time: t });
         trial = null;
-        clearBeacon();
-        game.minimap.setTarget(null, null);
-        game.hud.clearObjective();
-      } else {
-        const next = trial.def.checkpoints[trial.gateIndex];
-        setBeacon(next[0], next[1], 0x9be07a);
-        game.hud.setObjective(trial.def.name[lang()] || trial.def.name.en, next[0], next[1]);
       }
     }
-    // Leaving the area abandons the trial.
-    if (trial && dist2(game.player.x, game.player.z, trial.def.start[0], trial.def.start[1]) > 700) {
-      trial = null;
-      clearBeacon();
-      game.minimap.setTarget(null, null);
-      game.hud.clearObjective();
-      game.hud.notify(game.lang('trialAbandoned'), 'bad');
-    }
   }
 
-  function cancelActive(cleanupWorld = true) {
-    if (active) game.gangs.removeTag(active.tag);
-    active = null;
-    trial = null;
-    if (cleanupWorld) cleanup();
+  function update(dt, ctx) {
+    if (!state.active) refreshOffers();
+    const c = state.active;
+    if (c) {
+      const p = player.position();
+      if (c.timeLeft > 0) {
+        c.timeLeft -= dt;
+        if (c.timeLeft <= 0) { failActive('time'); return; }
+      }
+      switch (c.type) {
+        case 'delivery':
+          if (Math.hypot(p.x - c.dest.x, p.z - c.dest.z) < 9) completeActive();
+          break;
+        case 'getaway': {
+          const d = Math.hypot(p.x - c.dest.x, p.z - c.dest.z);
+          if (d < 9 && wanted.stars === 0) completeActive();
+          break;
+        }
+        case 'repo': {
+          const ps = player.state;
+          if (ps.inVehicle && ps.vehicle === c.targetVehicle) completeActive();
+          break;
+        }
+        case 'vigilante':
+          break; // completed by the ped-down handler
+        default:
+          break;
+      }
+    }
+    checkCaches();
+    checkStunts(dt);
+    checkTrials(dt);
+    void ctx;
   }
 
-  function update(dt) {
-    if (client) {
-      client.walkPhase += dt * 2;
-      animateWalker(client.parts, client.walkPhase, 0, false, false);
-      client.parts.group.rotation.y += dt * 0.3;
-    }
-    if (beacon) {
-      beacon.rotation.y += dt * 1.5;
-      beacon.position.y = 0.2 + Math.sin(game.time * 2) * 0.15;
-    }
-    if (active) updateActive(dt);
-    if (trial) updateTrial(dt);
-    updateCaches();
+  function waypoint() {
+    const c = state.active;
+    if (!c) return null;
+    if (c.type === 'vigilante' && c.targetPos) return { x: c.targetPos.x, z: c.targetPos.z };
+    if (c.type === 'repo' && c.targetVehicle) return { x: c.targetVehicle.x, z: c.targetVehicle.z };
+    return { x: c.dest.x, z: c.dest.z };
   }
+
+  refreshOffers();
 
   return {
-    get active() { return active; },
+    state,
+    update,
+    accept,
+    refreshOffers,
+    waypoint,
+    startTrial,
+    get active() { return state.active; },
+    get offers() { return state.offers; },
+    get caches() { return { found: state.cachesFound.length, total: CACHE_SPOTS.length, spots: CACHE_SPOTS }; },
+    get stuntJumps() { return STUNT_JUMPS; },
+    get timeTrials() { return TIME_TRIALS; },
+    get reputation() { return state.reputation; },
+    buildCaches,
     get trial() { return trial; },
-    get suppressHeat() { return suppressHeat; },
-    offered, accept, failActive, cancelActive, update,
-    stuntJumps: STUNT_JUMPS, recordStunt, trialNear, startTrial,
   };
 }
