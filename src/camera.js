@@ -128,11 +128,14 @@ export function createCameraRig(camera, city) {
     }
 
     // Damped follow: critically smooth, never a snap.
-    const yawRate = rig.mode === 'drive' ? 5.5 : 11;
+    // P6: the drive camera follows tighter (was 5.5/s) so the car
+    // stops looking diagonal while the heading changes, and a look
+    // drag yields back behind the car faster (decay 1.1 -> 2.0).
+    const yawRate = rig.mode === 'drive' ? 8 : 11;
     const damp = 1 - Math.exp(-yawRate * dt);
     rig.yaw += (rig.targetYaw - rig.yaw) * damp;
     rig.pitch += (rig.targetPitch - rig.pitch) * (1 - Math.exp(-9 * dt));
-    rig.dragYaw *= Math.exp(-1.1 * dt); // look-drag yield
+    rig.dragYaw *= Math.exp(-2.0 * dt); // look-drag yield
     rig.recoil *= Math.exp(-7 * dt); // recoil decays fast
 
     // --- desired camera position ---

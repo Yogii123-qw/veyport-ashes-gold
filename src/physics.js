@@ -41,7 +41,12 @@ export function createPhysics(deps) {
     }
 
     const speedFactor = Math.min(1, Math.abs(v.speed) / 7);
-    const highSpeedCut = 1 - 0.45 * Math.min(1, Math.abs(v.speed) / top);
+    // P6: stronger high-speed steering cut (was 0.45). At 250 km/h a
+    // resting thumb used to weave the car 18 deg/s; the cut now keeps
+    // small inputs gentle at speed while full lock still turns.
+    // Acceleration / top speed are untouched (F7): this factor only
+    // scales the turn rate, and measureAccel drives with steer 0.
+    const highSpeedCut = 1 - 0.65 * Math.min(1, Math.abs(v.speed) / top);
     const turn = steerIn * def.steer * speedFactor * highSpeedCut * (v.speed < 0 ? -1 : 1);
     v.heading += turn * dt;
     v.steerVis += (steerIn * 0.5 - v.steerVis) * Math.min(1, 8 * dt);
