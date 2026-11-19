@@ -121,6 +121,11 @@ button { font-family: inherit; cursor: pointer; }
 .tBtn.run.held { background: var(--good); }
 .tBtn.small { min-width: 56px; min-height: 44px; font-size: 12px; }
 #touchTop { position: absolute; right: 14px; top: calc(64px + env(safe-area-inset-top, 0px)); display: flex; gap: 8px; pointer-events: auto; }
+/* P1: on touch devices the desktop map/pause buttons hide — the touch
+   set above is the only one. Gated on body.touch (same JS detection
+   that shows #touchUI), never on a media query, so the two sets can
+   never disagree about which one is showing. */
+body.touch #topRight { display: none; }
 
 /* ---------- Overlays / menus ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(8, 10, 16, 0.72); display: flex; align-items: center; justify-content: center; z-index: 10; }
@@ -180,7 +185,11 @@ button { font-family: inherit; cursor: pointer; }
   #clockRow span { margin: 0 3px; }
   #objective { top: 148px; max-width: 250px; font-size: 12px; }
   #minimap { width: 118px; height: 118px; }
-  #weaponBox { bottom: 348px; right: 10px; }
+  /* P2: the weapon box sat at bottom 348px on the right, overlapping the
+     bottom row of the touch grid (AKSI/PAKAI spans 380-568px from the
+     bottom) — the ammo line hid under PAKAI. Move it to the left edge,
+     above the joystick (which tops out at 272px from the bottom). */
+  #weaponBox { bottom: 300px; left: 10px; right: auto; text-align: left; }
   #speedo { bottom: 218px; right: 10px; }
   #speedKmh { font-size: 30px; }
   #speedBar, #carHealth { width: 130px; }

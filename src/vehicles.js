@@ -49,7 +49,16 @@ function hullParts(def, paint) {
   } else {
     const cabL = L * 0.42;
     out.push(box(cabL, H * 0.4, W * 0.86, 0x1a2530, -L * 0.06, hullH + 0.28 + H * 0.2, 0));
-    out.push(box(cabL * 0.96, H * 0.06, W * 0.88, paint, -L * 0.06, hullH + 0.28 + H * 0.4, 0));
+    // Supercars: a smaller roof plate leaves a dark glass border visible
+    // from above, and a dark rear-glass panel reads from the chase
+    // camera — without them a white supercar is a plain box from
+    // behind/above (P3). Other classes keep the full roof.
+    const roofL = def.cls === 'supercar' ? cabL * 0.62 : cabL * 0.96;
+    const roofW = def.cls === 'supercar' ? W * 0.62 : W * 0.88;
+    out.push(box(roofL, H * 0.06, roofW, paint, -L * 0.06, hullH + 0.28 + H * 0.4, 0));
+    if (def.cls === 'supercar') {
+      out.push(box(0.06, H * 0.34, W * 0.8, 0x1a2530, -L * 0.06 - cabL / 2 - 0.01, hullH + 0.28 + H * 0.2, 0));
+    }
   }
   return { out, hullH };
 }
@@ -78,10 +87,21 @@ function trimParts(def, paint) {
     out.push(box(0.05, hullH * 0.7, 0.04, trim, -L * 0.18, hullH * 0.6, s * (W / 2 + 0.01)));
   }
   const wheelR = def.cls === 'supercar' ? 0.3 : 0.36;
+  // Supercars: dark, protruding arch lips read as wheel arches from the
+  // rear quarter; paint-coloured strips vanish on a light body (P3).
+  const archColor = def.cls === 'supercar' ? trim : paint;
+  const archH = def.cls === 'supercar' ? 0.16 : 0.12;
+  const archZ = def.cls === 'supercar' ? W / 2 + 0.01 : W / 2 - 0.02;
   for (const sx of [1, -1]) {
     for (const sz of [1, -1]) {
-      out.push(box(0.9, 0.12, 0.16, paint, sx * L * 0.32, wheelR + 0.28, sz * (W / 2 - 0.02)));
+      out.push(box(0.9, archH, 0.18, archColor, sx * L * 0.32, wheelR + 0.28, sz * archZ));
     }
+  }
+  // Supercars: one full-width red light bar across the rear — the rear
+  // signature. It sits 0.02 proud of the small lamps, so no coplanar
+  // faces fight; the lamps end up embedded inside it, invisible.
+  if (def.cls === 'supercar') {
+    out.push(box(0.08, 0.16, W * 0.92, 0xff2a2a, -L / 2 - 0.05, 0.72, 0));
   }
   return out;
 }
@@ -94,6 +114,7 @@ function classParts(def, paint) {
   const hullH = H * 0.52;
   const style = def.bodyStyle || {};
   const trim = 0x222222;
+  const chrome = 0x9aa0a8;
   const out = [];
   if (def.taxi) out.push(box(0.7, 0.22, 0.4, 0x111111, -L * 0.06, hullH + 0.28 + H * 0.46, 0));
   if (def.police) {
@@ -104,11 +125,21 @@ function classParts(def, paint) {
   if (style.spoiler === 'wing') {
     out.push(box(0.1, 0.5, 0.06, trim, -L / 2 + 0.12, hullH + 0.5, W * 0.32));
     out.push(box(0.1, 0.5, 0.06, trim, -L / 2 + 0.12, hullH + 0.5, -W * 0.32));
-    out.push(box(0.5, 0.08, W * 0.9, paint, -L / 2 + 0.05, hullH + 0.78, 0));
+    // Wing plane in dark trim, not paint: a paint wing on a light body
+    // disappears from behind (P3).
+    out.push(box(0.5, 0.08, W * 0.9, trim, -L / 2 + 0.05, hullH + 0.78, 0));
   } else if (style.spoiler === 'ducktail') {
-    out.push(box(0.5, 0.1, W * 0.9, paint, -L / 2 + 0.08, hullH + 0.55, 0));
+    // Ducktail in dark trim and taller: the paint lip was invisible on
+    // a white Seraph from the chase camera (P3).
+    out.push(box(0.55, 0.14, W * 0.9, trim, -L / 2 + 0.08, hullH + 0.55, 0));
   } else if (style.spoiler === 'lip') {
     out.push(box(0.3, 0.07, W * 0.88, trim, -L / 2 + 0.02, hullH + 0.5, 0));
+  }
+  if (def.cls === 'supercar') {
+    // Twin chrome exhaust tips under the rear bumper.
+    for (const s of [1, -1]) {
+      out.push(box(0.14, 0.12, 0.2, chrome, -L / 2 - 0.02, 0.32, s * W * 0.18));
+    }
   }
   if (style.doors === 'scissor' || style.doors === 'dihedral') {
     for (const s of [1, -1]) {

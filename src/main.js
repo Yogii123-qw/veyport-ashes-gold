@@ -171,7 +171,13 @@ function startGame(fresh) {
   if (fresh) resetGame();
   setScreen('play');
   document.getElementById('hud').classList.remove('hidden');
-  if (input.isTouch()) document.getElementById('touchUI').classList.remove('hidden');
+  if (input.isTouch()) {
+    document.getElementById('touchUI').classList.remove('hidden');
+    // One map/pause set only: the touch set (PETA/II) replaces the
+    // desktop set (Peta/II) on touch devices — same detection that
+    // shows the touch UI, so the two can never double up (P1).
+    document.body.classList.add('touch');
+  }
   cameraRig.setMode('foot');
   audio.resume();
   if (!p9NoticeShown) {
@@ -225,6 +231,7 @@ menus.bindButtons({
     setScreen('menu');
     document.getElementById('hud').classList.add('hidden');
     document.getElementById('touchUI').classList.add('hidden');
+    document.body.classList.remove('touch');
     cameraRig.setMode('menu');
   },
   closeShop: () => setScreen('play'),
