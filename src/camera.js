@@ -60,9 +60,14 @@ class ProxyTarget {
   // Chase an interpolated focus. XZ fast, Y slow, yaw shortest-arc.
   // Feed-forward: aim slightly ahead of the velocity so the proxy does
   // not lag behind a fast car.
-  // Yaw: on foot the camera yaw is its own state (look-drag only); the
-  // proxy never chases the player's facing here, or the stick whips the
-  // view (R4-D, ~700 deg/s). Drive chases the car's heading slowly
+  // Yaw: on foot the proxy chases the player's heading SLOWLY
+  // (rate 2.5, hard cap 1.75 rad/s, gated on a firm stick deflection
+  // above 0.5), so the camera swings gently behind the walking
+  // direction and settles there (R4-E). The target is player.heading,
+  // never rig.yaw: feeding rig.yaw back as the chase target would
+  // amplify each look-drag several times over (R4-D). Aiming holds
+  // its yaw (no chase): the aim camera must not swing while the
+  // player turns to aim. Drive chases the car's heading slowly
   // (rate 6, was 20) so a turn never snaps the view; menu keeps 20.
   chase(f, dt, speed) {
     const kxz = damp(25, dt);
@@ -73,17 +78,21 @@ class ProxyTarget {
     this.x += (lx - this.x) * kxz;
     this.z += (lz - this.z) * kxz;
     this.y += (f.y - this.y) * ky;
-    if (f.mode !== 'foot') {
-      const kyaw = damp(f.mode === 'drive' ? 6 : 20, dt);
+    const isFoot = f.mode === 'foot';
+    // No yaw chase while aiming, and no foot chase for a small thumb
+    // wobble: a 20% nudge must not swing the camera (R4-E d).
+    if (!f.aiming && (!isFoot || (f.stickMag || 0) > 0.5)) {
+      const kyaw = damp(f.mode === 'drive' ? 6 : isFoot ? 2.5 : 20, dt);
       let step = shortArc(this.yaw, f.heading) * kyaw;
-      if (f.mode === 'drive') {
+      if (f.mode === 'drive' || isFoot) {
         // Hard cap on the chase rate: a sudden yaw of the car (a spin,
-        // an impact) must never whip the view. 1.75 rad/s is ~100 deg/s;
-        // an ordinary turn needs far less, so the cap only binds on a
-        // spike (R4-D: uncapped, full-lock steer from standstill peaked
-        // at 137 deg/s while the car itself peaked at 121 deg/s; a
-        // 1.9 rad/s cap still measured 111 deg/s, so the margin is set
-        // here, under the ~120 deg/s bar with room for sample jitter).
+        // an impact) or of the player (a sharp turn) must never whip
+        // the view. 1.75 rad/s is ~100 deg/s; an ordinary turn needs
+        // far less, so the cap only binds on a spike (R4-D: uncapped,
+        // full-lock steer from standstill peaked at 137 deg/s while
+        // the car itself peaked at 121 deg/s; a 1.9 rad/s cap still
+        // measured 111 deg/s, so the margin is set here, under the
+        // ~120 deg/s bar with room for sample jitter).
         const cap = 1.75 * dt;
         step = Math.max(-cap, Math.min(cap, step));
       }

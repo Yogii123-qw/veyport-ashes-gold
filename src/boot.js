@@ -154,19 +154,31 @@ export function boot() {
   // Render-interpolation snapshots of the focus entity.
   let prevFocus = { x: player.x, y: 1.4, z: player.z, heading: player.heading, speed: 0 };
   let currFocus = { ...prevFocus };
+  // Latest stick deflection magnitude (0..1, after the dead zone),
+  // read by focusOf so the camera can tell a firm push apart from a
+  // small thumb wobble (R4-E).
+  let lastStickMag = 0;
 
   function focusOf() {
     if (player.onFoot) {
-      // Foot camera is decoupled from the player's facing: its heading
-      // is the camera's own yaw (rig.yaw), changed only by look-drag
-      // and by snapTo at transitions. Chasing player.heading whipped
-      // the view whenever the stick turned the player (R4-D, measured
-      // ~700 deg/s on Monch's phone): the ghost stick input turned the
-      // player, the camera chased the turn, the turn changed the move
-      // direction. The proxy chase is also barred from yaw on foot
-      // (camera.js), or feeding rig.yaw back as the chase target would
-      // amplify each drag several times over.
-      return { x: player.x, y: 1.4, z: player.z, heading: rig.yaw, speed: player.speed, mode: 'foot' };
+      // Foot camera follows the player's heading (R4-E): when the
+      // player walks in a new direction the camera swings gently
+      // behind them and settles there. The chase itself lives in
+      // camera.js (slow rate 2.5/s, hard cap 1.75 rad/s, gated on a
+      // firm stick deflection). Aiming keeps the old decoupled
+      // heading (rig.yaw): the aim camera must not swing while the
+      // player turns to aim. R4-D decoupled foot entirely because
+      // chasing player.heading whipped the view at ~700 deg/s; that
+      // whip is gone now that the ghost stick input is fixed, the
+      // chase is slow and capped, and the walk direction is locked
+      // while the stick is held (player.js), so the chase target is
+      // stable and the camera can settle instead of chasing a target
+      // that rotates away from it.
+      const aiming = player.aiming;
+      return { x: player.x, y: 1.4, z: player.z,
+        heading: aiming ? rig.yaw : player.heading,
+        speed: player.speed, mode: 'foot',
+        aiming, stickMag: lastStickMag };
     }
     const v = player.vehicle;
     return { x: v.x, y: 1.2, z: v.z, heading: v.heading, speed: Math.abs(v.speed), mode: 'drive', vx: v.vx || 0, vz: v.vz || 0 };
@@ -185,6 +197,8 @@ export function boot() {
       heading: prevFocus.heading + shortArc(prevFocus.heading, currFocus.heading) * alpha,
       speed: currFocus.speed,
       mode: currFocus.mode,
+      aiming: currFocus.aiming || false,
+      stickMag: currFocus.stickMag || 0,
       vx: currFocus.vx || 0, vz: currFocus.vz || 0,
     };
   }
@@ -218,6 +232,7 @@ export function boot() {
     // Player.
     if (playing) {
       const mv = input.moveVector();
+      lastStickMag = Math.hypot(mv.x, mv.y);
       const ctrl = { moveX: mv.x, moveY: mv.y, run: input.run };
       const camYaw = rig.yaw;
       player.aiming = input.fireHeld && player.onFoot;

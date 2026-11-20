@@ -100,6 +100,7 @@ export class Player {
     this.exitTimer = 0;
     this.walkPhase = 0;
     this.aiming = false;
+    this.moveLock = null; // R4-E: locked walk direction, see step().
     // F1: starts armed - fists plus a P9 with ammo.
     this.owned = {
       fists: { mag: Infinity, reserve: Infinity },
@@ -233,7 +234,10 @@ export class Player {
       }
       return;
     }
-    if (!this.onFoot) return;
+    if (!this.onFoot) {
+      this.moveLock = null;
+      return;
+    }
     // Camera-relative movement: joystick up = away from camera.
     // Forward on screen is (sin(camYaw), cos(camYaw)): the chase camera
     // sits behind the player at (-sin, -cos) * dist and looks along
@@ -252,11 +256,33 @@ export class Player {
       const rightX = -fwdZ, rightZ = fwdX;
       const dx = rightX * nx + fwdX * ny;
       const dz = rightZ * nx + fwdZ * ny;
+      // Movement-direction lock (R4-E): the walk direction is fixed
+      // in world space while the stick is held. The thumb's own angle
+      // (in camera space) re-locks it only when the thumb itself
+      // moves (over ~30 deg) or the stick is re-centered. Without
+      // this, the walk direction rotates with the camera as it swings
+      // behind the player, the player keeps turning, and the camera
+      // can never settle behind them: the pair would rotate together
+      // at the chase cap forever. With the lock, the player's heading
+      // is a stable target and the camera swings behind it and stops.
+      const thumbAngle = Math.atan2(nx, ny);
+      const dirLen = Math.hypot(dx, dz) || 1;
+      if (!this.moveLock) {
+        this.moveLock = { thumb: thumbAngle, dx: dx / dirLen, dz: dz / dirLen };
+      } else {
+        let dThumb = thumbAngle - this.moveLock.thumb;
+        while (dThumb > Math.PI) dThumb -= 2 * Math.PI;
+        while (dThumb < -Math.PI) dThumb += 2 * Math.PI;
+        if (Math.abs(dThumb) > 0.5) {
+          this.moveLock = { thumb: thumbAngle, dx: dx / dirLen, dz: dz / dirLen };
+        }
+      }
+      const wdx = this.moveLock.dx, wdz = this.moveLock.dz;
       const want = Math.min(1, mag) * target;
       this.speed += (want - this.speed) * Math.min(1, dt * 10);
       const stepLen = this.speed * dt;
-      let px = this.x + dx * stepLen;
-      let pz = this.z + dz * stepLen;
+      let px = this.x + wdx * stepLen;
+      let pz = this.z + wdz * stepLen;
       // Circle vs building AABB.
       const r = 0.5;
       for (const b of colliders) {
@@ -273,13 +299,14 @@ export class Player {
       px = Math.max(-640, Math.min(640, px));
       pz = Math.max(-640, Math.min(640, pz));
       this.x = px; this.z = pz;
-      const face = Math.atan2(dx, dz);
+      const face = Math.atan2(wdx, wdz);
       let dh = face - this.heading;
       while (dh > Math.PI) dh -= 2 * Math.PI;
       while (dh < -Math.PI) dh += 2 * Math.PI;
       this.heading += dh * Math.min(1, dt * 12);
     } else {
       this.speed += (0 - this.speed) * Math.min(1, dt * 10);
+      this.moveLock = null;
     }
     // Walk cycle.
     this.walkPhase += dt * (2 + this.speed * 1.6);
